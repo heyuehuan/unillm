@@ -1,0 +1,11 @@
+# UniLLM Configuration
+
+model_list:
+  - model_name: gemini-2.5-flash-lite
+    unillm_params:
+      model: gemini-2.5-flash-lite
+      project: gcp-project-id
+      location: us-central1
+
+general_settings:
+  port: 4000

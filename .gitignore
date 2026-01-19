@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+.env
+.env.*
+.venv/
+.venv
+.newenv
+newenv/
+.python-version
+
+# VS Code
+.vscode/
+.vscode/settings.json
+
+# macOS
+.DS_Store
+
+# PyCharm/IDEA
+.idea/
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# Build/Dist
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# Secrets
+secrets.toml
+.env
+unillm_config.yaml
+
+# Node/Frontend (if any)
+node_modules/
+*.lock
+
+# Misc
+*.tgz

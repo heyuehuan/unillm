@@ -263,6 +263,9 @@ class VertexAIHandler:
                 return self._stream_response(client, url, headers, request_body, model)
             else:
                 response = await client.post(url, headers=headers, json=request_body)
+                if response.status_code != 200:
+                    error_text = response.text
+                    verbose_proxy_logger.error(f"Vertex AI error response: {error_text}")
                 response.raise_for_status()
                 gemini_response = response.json()
                 return self._convert_gemini_response_to_openai(gemini_response, model)

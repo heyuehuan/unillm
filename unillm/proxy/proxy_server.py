@@ -30,7 +30,12 @@ from unillm.types import (
     UserAPIKeyAuth,
 )
 from unillm.llm.vertex_ai import VertexAIHandler
+from unillm.llm.vertex_ai_kms import VertexAIKMSHandler
 
+
+# Model type constants
+MODEL_TYPE_VERTEX_AI = "vertex-ai"
+MODEL_TYPE_VERTEX_AI_KMS = "vertex-ai-kms"
 
 # Global configuration
 model_list: List[Dict[str, Any]] = []
@@ -74,11 +79,25 @@ class ProxyConfig:
             
             project = unillm_params.get("project")
             location = unillm_params.get("location", "us-central1")
+            model_type = unillm_params.get("model_type", MODEL_TYPE_VERTEX_AI)
             
-            vertex_handlers[model_name] = VertexAIHandler(
-                project=project,
-                location=location,
-            )
+            # Route to appropriate handler based on model_type
+            if model_type == MODEL_TYPE_VERTEX_AI_KMS:
+                kms_key_name = unillm_params.get("kms_key_name")
+                vertex_handlers[model_name] = VertexAIKMSHandler(
+                    project=project,
+                    location=location,
+                    kms_key_name=kms_key_name,
+                )
+                verbose_proxy_logger.info(
+                    f"Initialized KMS handler for model '{model_name}' with KMS key"
+                )
+            else:
+                # Default: vertex-ai
+                vertex_handlers[model_name] = VertexAIHandler(
+                    project=project,
+                    location=location,
+                )
         
         verbose_proxy_logger.info(f"Loaded {len(self.model_list)} models from config")
     
@@ -213,16 +232,29 @@ async def _read_request_body(request: Request) -> Dict[str, Any]:
 def _get_handler_for_model(model_name: str) -> VertexAIHandler:
     """Get the appropriate handler for a model"""
     if model_name in vertex_handlers:
-        return vertex_handlers[model_name]
+        handler = vertex_handlers[model_name]
+        verbose_proxy_logger.debug(f"Using cached handler for model '{model_name}': {type(handler).__name__}")
+        return handler
     
     # Try to find a matching model configuration
     model_config = proxy_config.get_model_config(model_name)
     if model_config:
         params = model_config.get("litellm_params", model_config.get("unillm_params", {}))
-        return VertexAIHandler(
-            project=params.get("project"),
-            location=params.get("location", "us-central1"),
-        )
+        model_type = params.get("model_type", MODEL_TYPE_VERTEX_AI)
+        verbose_proxy_logger.debug(f"Model '{model_name}' has model_type: {model_type}")
+        
+        # Route to appropriate handler based on model_type
+        if model_type == MODEL_TYPE_VERTEX_AI_KMS:
+            return VertexAIKMSHandler(
+                project=params.get("project"),
+                location=params.get("location", "us-central1"),
+                kms_key_name=params.get("kms_key_name"),
+            )
+        else:
+            return VertexAIHandler(
+                project=params.get("project"),
+                location=params.get("location", "us-central1"),
+            )
     
     # Return default handler
     return VertexAIHandler()
@@ -279,17 +311,24 @@ async def chat_completions(
     verbose_proxy_logger.debug(f"Chat completion request for model: {model} -> {actual_model}")
     
     try:
-        response = await handler.chat_completion(
-            model=actual_model,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            stop=stop,
-            stream=stream,
-            project=model_params.get("project"),
-            location=model_params.get("location"),
-        )
+        # Build kwargs for handler - include kms_key_name if present (for vertex-ai-kms)
+        handler_kwargs = {
+            "model": actual_model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stop": stop,
+            "stream": stream,
+            "project": model_params.get("project"),
+            "location": model_params.get("location"),
+        }
+        
+        # Add kms_key_name if present (for vertex-ai-kms handler)
+        if model_params.get("kms_key_name"):
+            handler_kwargs["kms_key_name"] = model_params.get("kms_key_name")
+        
+        response = await handler.chat_completion(**handler_kwargs)
         
         if stream:
             return StreamingResponse(
@@ -339,17 +378,24 @@ async def completions(
     verbose_proxy_logger.debug(f"Text completion request for model: {model} -> {actual_model}")
     
     try:
-        response = await handler.text_completion(
-            model=actual_model,
-            prompt=prompt,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            stop=stop,
-            stream=stream,
-            project=model_params.get("project"),
-            location=model_params.get("location"),
-        )
+        # Build kwargs for handler - include kms_key_name if present (for vertex-ai-kms)
+        handler_kwargs = {
+            "model": actual_model,
+            "prompt": prompt,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stop": stop,
+            "stream": stream,
+            "project": model_params.get("project"),
+            "location": model_params.get("location"),
+        }
+        
+        # Add kms_key_name if present (for vertex-ai-kms handler)
+        if model_params.get("kms_key_name"):
+            handler_kwargs["kms_key_name"] = model_params.get("kms_key_name")
+        
+        response = await handler.text_completion(**handler_kwargs)
         
         if stream:
             return StreamingResponse(

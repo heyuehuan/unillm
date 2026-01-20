@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from unillm import __version__
 from unillm._logging import verbose_proxy_logger, set_verbose
-from unillm.proxy.auth import user_api_key_auth
+from unillm.proxy.auth import user_api_key_auth, set_general_settings
 from unillm.types import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -68,6 +68,9 @@ class ProxyConfig:
         # Load general settings
         self.general_settings = config.get("general_settings", {})
         general_settings = self.general_settings
+        
+        # Set general settings for auth module (needed for SSH verification)
+        set_general_settings(self.general_settings)
         
         # Initialize handlers for each model
         for model_config in self.model_list:
@@ -338,7 +341,17 @@ async def chat_completions(
         else:
             # Update model name in response to match request
             response.model = model
-            return response
+            
+            # Convert to dict to add SSH info
+            response_dict = response.model_dump()
+            
+            # Add SSH verification info if available
+            if user_api_key_dict.ssh_username:
+                response_dict["user"] = user_api_key_dict.ssh_username
+            if user_api_key_dict.ssh_warning:
+                response_dict["warning"] = user_api_key_dict.ssh_warning
+            
+            return response_dict
     
     except Exception as e:
         verbose_proxy_logger.exception(f"Error in chat completion: {e}")
@@ -405,7 +418,17 @@ async def completions(
         else:
             # Update model name in response to match request
             response.model = model
-            return response
+            
+            # Convert to dict to add SSH info
+            response_dict = response.model_dump()
+            
+            # Add SSH verification info if available
+            if user_api_key_dict.ssh_username:
+                response_dict["user"] = user_api_key_dict.ssh_username
+            if user_api_key_dict.ssh_warning:
+                response_dict["warning"] = user_api_key_dict.ssh_warning
+            
+            return response_dict
     
     except Exception as e:
         verbose_proxy_logger.exception(f"Error in text completion: {e}")

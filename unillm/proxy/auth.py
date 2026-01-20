@@ -3,19 +3,40 @@ Authentication module for UniLLM
 
 Uses environment variable UNILLM_API_KEYS to store allowed API keys.
 Format: comma-separated list of keys, e.g., "sk-key1,sk-key2,sk-key3"
+
+SSH Key Authentication:
+When ssh_required is set to 'enforce' or 'warning' in general_settings,
+API keys can include SSH signatures for enhanced security.
+Format: original-api-key||key-name||base64-signature
 """
 
 import os
-from typing import Optional
+from typing import Dict, Optional
 from fastapi import HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from unillm._logging import verbose_proxy_logger
 from unillm.types import UserAPIKeyAuth
+from unillm.proxy.ssh_auth import (
+    get_ssh_mode,
+    verify_api_key_ssh,
+    get_original_api_key,
+    SSH_MODE_NONE,
+    SSH_MODE_ENFORCE,
+)
 
 
 # Security scheme
 security = HTTPBearer(auto_error=False)
+
+# Global reference to general_settings (set by proxy_server)
+_general_settings: Dict = {}
+
+
+def set_general_settings(settings: Dict):
+    """Set the general settings reference for SSH mode lookup."""
+    global _general_settings
+    _general_settings = settings
 
 
 def get_allowed_keys() -> set:
@@ -75,21 +96,71 @@ async def user_api_key_auth(
             detail="API key required. Provide via 'Authorization: Bearer <key>' or 'x-api-key' header.",
         )
     
+    # Get SSH verification mode
+    ssh_mode = get_ssh_mode(_general_settings)
+    
+    # Extract original API key (without SSH signature parts) for validation
+    original_api_key = get_original_api_key(api_key)
+    
     # Get allowed keys
     allowed_keys = get_allowed_keys()
     
     # If no keys are configured, allow all requests (development mode)
     if not allowed_keys:
         verbose_proxy_logger.warning("No API keys configured - allowing all requests (development mode)")
-        return UserAPIKeyAuth(api_key=api_key, valid=True)
+        # Still perform SSH verification if enabled
+        if ssh_mode != SSH_MODE_NONE:
+            ssh_result = verify_api_key_ssh(api_key, ssh_mode)
+            if ssh_mode == SSH_MODE_ENFORCE and not ssh_result.verified:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=ssh_result.error or "SSH key verification failed",
+                )
+            return UserAPIKeyAuth(
+                api_key=original_api_key,
+                valid=True,
+                ssh_verified=ssh_result.verified,
+                ssh_username=ssh_result.username,
+                ssh_key_name=ssh_result.key_name,
+                ssh_warning=ssh_result.warning,
+            )
+        return UserAPIKeyAuth(api_key=original_api_key, valid=True)
     
-    # Validate the API key
-    if api_key not in allowed_keys:
-        verbose_proxy_logger.warning(f"Invalid API key provided: {api_key[:8]}...")
+    # Validate the original API key (without SSH signature)
+    if original_api_key not in allowed_keys:
+        verbose_proxy_logger.warning(f"Invalid API key provided: {original_api_key[:8]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
         )
     
-    verbose_proxy_logger.debug(f"API key authenticated: {api_key[:8]}...")
-    return UserAPIKeyAuth(api_key=api_key, valid=True)
+    # Perform SSH verification if enabled
+    if ssh_mode != SSH_MODE_NONE:
+        ssh_result = verify_api_key_ssh(api_key, ssh_mode)
+        
+        # In enforce mode, reject if SSH verification fails
+        if ssh_mode == SSH_MODE_ENFORCE and not ssh_result.verified:
+            verbose_proxy_logger.warning(
+                f"SSH verification failed for key {original_api_key[:8]}...: {ssh_result.error}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ssh_result.error or "SSH key verification failed",
+            )
+        
+        verbose_proxy_logger.debug(
+            f"API key authenticated: {original_api_key[:8]}... "
+            f"SSH verified: {ssh_result.verified}, user: {ssh_result.username}"
+        )
+        return UserAPIKeyAuth(
+            api_key=original_api_key,
+            valid=True,
+            user_id=ssh_result.username,
+            ssh_verified=ssh_result.verified,
+            ssh_username=ssh_result.username,
+            ssh_key_name=ssh_result.key_name,
+            ssh_warning=ssh_result.warning,
+        )
+    
+    verbose_proxy_logger.debug(f"API key authenticated: {original_api_key[:8]}...")
+    return UserAPIKeyAuth(api_key=original_api_key, valid=True)

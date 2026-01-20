@@ -61,9 +61,30 @@ def main(host: str, port: int, config: str, debug: bool, reload: bool):
         python -m unillm.proxy.proxy_cli --config config.yaml --debug
     """
     import uvicorn
+    import yaml
     
     from unillm import __version__
     from unillm._logging import set_verbose
+    from unillm.proxy.ssh_auth import SSH_MODE_NONE, SSH_MODE_WARNING, SSH_MODE_ENFORCE
+    
+    # Load SSH mode from config
+    ssh_mode = SSH_MODE_NONE
+    ssh_keys_configured = bool(os.getenv("UNILLM_SSH_KEYS", ""))
+    if config:
+        try:
+            with open(config, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+                general_settings = cfg.get("general_settings", {})
+                ssh_mode = general_settings.get("ssh_required", SSH_MODE_NONE)
+        except Exception:
+            pass
+    
+    # Format SSH mode display
+    ssh_mode_display = {
+        SSH_MODE_NONE: "none (disabled)",
+        SSH_MODE_WARNING: "warning (verify but allow)",
+        SSH_MODE_ENFORCE: "enforce (reject invalid)",
+    }.get(ssh_mode, ssh_mode)
     
     # Print banner
     print()
@@ -75,6 +96,9 @@ def main(host: str, port: int, config: str, debug: bool, reload: bool):
     print(f"  Port: {port}")
     print(f"  Config: {config or 'None'}")
     print(f"  Debug: {debug}")
+    print(f"  SSH Auth: {ssh_mode_display}")
+    if ssh_mode != SSH_MODE_NONE:
+        print(f"  SSH Keys: {'configured' if ssh_keys_configured else 'NOT CONFIGURED'}")
     print()
     print("=" * 60)
     print()

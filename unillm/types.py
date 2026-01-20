@@ -144,8 +144,29 @@ class ErrorResponse(BaseModel):
     error: Dict[str, Any]
 
 
+class SSHKeyInfo(BaseModel):
+    """SSH key registration info"""
+    key_name: str
+    public_key: str
+    username: str
+
+
+class SSHVerificationResult(BaseModel):
+    """Result of SSH key signature verification"""
+    verified: bool = False
+    username: Optional[str] = None
+    key_name: Optional[str] = None
+    warning: Optional[str] = None
+    error: Optional[str] = None
+
+
 class UserAPIKeyAuth(BaseModel):
     """User API key authentication result"""
     api_key: str
     valid: bool = True
     user_id: Optional[str] = None
+    # SSH verification fields
+    ssh_verified: bool = False
+    ssh_username: Optional[str] = None
+    ssh_key_name: Optional[str] = None
+    ssh_warning: Optional[str] = None

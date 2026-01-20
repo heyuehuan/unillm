@@ -229,6 +229,7 @@ python -m unillm.client.ssh_signer sk-your-api-key --output json
 ```
 
 The client automatically:
+
 - Uses your system username as the default key-name
 - Searches common SSH key locations (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, etc.)
 - Selects the newest key if multiple are found

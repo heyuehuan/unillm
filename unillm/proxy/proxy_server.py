@@ -140,6 +140,18 @@ async def lifespan(app: FastAPI):
     # Initialize database
     init_db()
 
+    # Seed first admin from env vars if no admin exists yet
+    db = next(get_db())
+    try:
+        api_key = crud.seed_admin_if_needed(db)
+        if api_key:
+            verbose_proxy_logger.warning(
+                f"Admin user '{os.getenv('UNILLM_ADMIN_USERNAME')}' created. "
+                f"API key (shown once): {api_key}"
+            )
+    finally:
+        db.close()
+
     # Load config if provided
     config_path = os.getenv("UNILLM_CONFIG", "")
     if config_path and os.path.exists(config_path):

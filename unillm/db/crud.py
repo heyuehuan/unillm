@@ -1,4 +1,5 @@
 import hashlib
+import os
 import secrets
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -268,3 +269,33 @@ def create_request_log(
     db.add(log)
     db.commit()
     return log
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
+
+def seed_admin_if_needed(db: Session) -> Optional[str]:
+    """
+    Create the first admin user from env vars if no admin exists yet.
+
+    Reads UNILLM_ADMIN_USERNAME and UNILLM_ADMIN_PASSWORD.
+    Returns the plaintext API key if an admin was created, None otherwise.
+    """
+    username = os.getenv("UNILLM_ADMIN_USERNAME", "").strip()
+    password = os.getenv("UNILLM_ADMIN_PASSWORD", "").strip()
+    if not username or not password:
+        return None
+
+    existing_admin = db.query(User).filter(User.global_role == "admin", User.active == True).first()
+    if existing_admin:
+        return None
+
+    from unillm.proxy.api_routes import hash_password
+    _, plaintext_key = create_user(
+        db=db,
+        username=username,
+        hashed_password=hash_password(password),
+        global_role="admin",
+    )
+    return plaintext_key

@@ -24,5 +24,20 @@ def get_db():
 
 
 def init_db():
-    from unillm.db import models  # noqa: F401 — ensures models are registered
-    Base.metadata.create_all(bind=engine)
+    """Run all pending Alembic migrations. Falls back to create_all for in-memory test DBs."""
+    if DATABASE_URL == "sqlite:///:memory:":
+        from unillm.db import models  # noqa: F401
+        Base.metadata.create_all(bind=engine)
+        return
+
+    from alembic.config import Config
+    from alembic import command
+    import os
+
+    alembic_cfg = Config()
+    alembic_cfg.set_main_option(
+        "script_location",
+        os.path.join(os.path.dirname(__file__), "..", "..", "alembic"),
+    )
+    alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+    command.upgrade(alembic_cfg, "head")

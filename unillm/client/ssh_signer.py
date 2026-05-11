@@ -39,8 +39,6 @@ COMMON_SSH_KEY_PATHS = [
     "~/.ssh/id_ed25519",      # Ed25519 (recommended, most modern)
     "~/.ssh/id_ecdsa",        # ECDSA
     "~/.ssh/id_rsa",          # RSA
-    "~/.ssh/id_dsa",          # DSA (legacy, not recommended)
-    "~/.ssh/identity",        # SSH1 (very old)
 ]
 
 

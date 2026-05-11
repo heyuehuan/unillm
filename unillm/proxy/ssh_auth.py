@@ -47,62 +47,64 @@ def get_ssh_mode(general_settings: Dict) -> str:
     return mode
 
 
-def load_ssh_keys() -> Dict[str, SSHKeyInfo]:
+def load_ssh_keys(db=None) -> Dict[str, SSHKeyInfo]:
     """
-    Load SSH public keys from environment variable.
-    
-    Format: UNILLM_SSH_KEYS="key_name1:public_key_value1:username1,key_name2:public_key_value2:username2"
-    
-    Returns:
-        Dictionary mapping key_name to SSHKeyInfo
+    Load SSH public keys. DB is preferred; env var UNILLM_SSH_KEYS is the fallback.
+
+    Format for env var fallback:
+      UNILLM_SSH_KEYS="key_name1:public_key1:username1,key_name2:public_key2:username2"
     """
+    # --- DB source (preferred) ---
+    if db is not None:
+        try:
+            from unillm.db.crud import get_all_ssh_keys
+            keys = get_all_ssh_keys(db)
+            if keys:
+                verbose_proxy_logger.debug(f"Loaded {len(keys)} SSH keys from DB")
+                return keys
+        except Exception as e:
+            verbose_proxy_logger.warning(f"Failed to load SSH keys from DB, falling back to env var: {e}")
+
+    # --- Env var fallback (uses cache) ---
     global _ssh_keys_cache
-    
     if _ssh_keys_cache is not None:
         return _ssh_keys_cache
-    
+
     _ssh_keys_cache = {}
-    
     ssh_keys_str = os.getenv("UNILLM_SSH_KEYS", "")
     if not ssh_keys_str:
         verbose_proxy_logger.debug("No SSH keys configured (UNILLM_SSH_KEYS not set)")
         return _ssh_keys_cache
-    
-    # Parse key entries (comma-separated)
-    key_entries = ssh_keys_str.split(",")
-    
-    for entry in key_entries:
+
+    for entry in ssh_keys_str.split(","):
         entry = entry.strip()
         if not entry:
             continue
-        
-        # Parse key_name:public_key:username
+
         parts = entry.split(":", 2)
         if len(parts) != 3:
             verbose_proxy_logger.warning(
                 f"Invalid SSH key entry format: {entry[:50]}... Expected 'key_name:public_key:username'"
             )
             continue
-        
+
         key_name, public_key, username = parts
-        key_name = key_name.strip()
-        public_key = public_key.strip()
-        username = username.strip()
-        
+        key_name, public_key, username = key_name.strip(), public_key.strip(), username.strip()
+
         if not all([key_name, public_key, username]):
             verbose_proxy_logger.warning(
                 f"Empty values in SSH key entry: key_name={key_name}, username={username}"
             )
             continue
-        
+
         _ssh_keys_cache[key_name] = SSHKeyInfo(
             key_name=key_name,
             public_key=public_key,
             username=username,
         )
-        verbose_proxy_logger.info(f"Registered SSH key: {key_name} for user: {username}")
-    
-    verbose_proxy_logger.info(f"Loaded {len(_ssh_keys_cache)} SSH public keys")
+        verbose_proxy_logger.info(f"Registered SSH key from env: {key_name} for user: {username}")
+
+    verbose_proxy_logger.info(f"Loaded {len(_ssh_keys_cache)} SSH keys from env var")
     return _ssh_keys_cache
 
 
@@ -238,6 +240,7 @@ def verify_ssh_signature(
 def verify_api_key_ssh(
     api_key: str,
     ssh_mode: str,
+    db=None,
 ) -> SSHVerificationResult:
     """
     Verify an API key's SSH signature.

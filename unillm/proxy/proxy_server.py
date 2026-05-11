@@ -172,8 +172,8 @@ async def root():
 
 
 # Model endpoints
-@app.get("/v1/models", dependencies=[Depends(user_api_key_auth)])
-@app.get("/models", dependencies=[Depends(user_api_key_auth)])
+@app.get("/v1/models")
+@app.get("/models")
 async def list_models(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ) -> ModelListResponse:
@@ -195,8 +195,8 @@ async def list_models(
     return ModelListResponse(object="list", data=models)
 
 
-@app.get("/v1/models/{model_id}", dependencies=[Depends(user_api_key_auth)])
-@app.get("/models/{model_id}", dependencies=[Depends(user_api_key_auth)])
+@app.get("/v1/models/{model_id}")
+@app.get("/models/{model_id}")
 async def get_model(
     model_id: str,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),

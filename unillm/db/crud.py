@@ -2,11 +2,12 @@ import hashlib
 import os
 import secrets
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from unillm.db.models import APIKey, Project, RequestLog, SSHKey, User, UserProjectAccess
+from unillm.db.models import APIKey, AuditLog, ModelPricing, Project, RequestLog, SSHKey, User, UserProjectAccess
 from unillm.types import SSHKeyInfo
 
 
@@ -246,29 +247,256 @@ def revoke_api_key(db: Session, key_id: int, project_id: int) -> bool:
 def create_request_log(
     db: Session,
     model: str,
+    request_id: Optional[str] = None,
+    user_id: Optional[int] = None,
     project_id: Optional[int] = None,
     api_key_name: Optional[str] = None,
+    api_key_prefix: Optional[str] = None,
     ssh_username: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    backend_model: Optional[str] = None,
+    model_type: Optional[str] = None,
+    stream: bool = False,
     labels: Optional[dict] = None,
+    status_code: Optional[int] = None,
+    error_message: Optional[str] = None,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: Optional[float] = None,
     latency_ms: Optional[int] = None,
-    status_code: Optional[int] = None,
 ) -> RequestLog:
     log = RequestLog(
+        request_id=request_id,
+        user_id=user_id,
         project_id=project_id,
         api_key_name=api_key_name,
+        api_key_prefix=api_key_prefix,
         ssh_username=ssh_username,
+        ip_address=ip_address,
         model=model,
+        backend_model=backend_model,
+        model_type=model_type,
+        stream=stream,
         labels=labels,
+        status_code=status_code,
+        error_message=error_message,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        total_tokens=total_tokens or (prompt_tokens + completion_tokens),
+        cost_usd=cost_usd,
         latency_ms=latency_ms,
-        status_code=status_code,
     )
     db.add(log)
     db.commit()
     return log
+
+
+# ---------------------------------------------------------------------------
+# Audit Logs (append-only — no update or delete)
+# ---------------------------------------------------------------------------
+
+def create_audit_log(
+    db: Session,
+    action: str,
+    severity: str = "info",
+    user_id: Optional[int] = None,
+    username: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> AuditLog:
+    log = AuditLog(
+        user_id=user_id,
+        username=username,
+        action=action,
+        severity=severity,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        detail=detail,
+    )
+    db.add(log)
+    db.commit()
+    return log
+
+
+# ---------------------------------------------------------------------------
+# Log queries
+# ---------------------------------------------------------------------------
+
+def query_request_logs(
+    db: Session,
+    project_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    model: Optional[str] = None,
+    status_code: Optional[int] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Tuple[List[RequestLog], int]:
+    q = db.query(RequestLog)
+    if project_id is not None:
+        q = q.filter(RequestLog.project_id == project_id)
+    if user_id is not None:
+        q = q.filter(RequestLog.user_id == user_id)
+    if model is not None:
+        q = q.filter(RequestLog.model == model)
+    if status_code is not None:
+        q = q.filter(RequestLog.status_code == status_code)
+    if from_date is not None:
+        q = q.filter(RequestLog.created_at >= from_date)
+    if to_date is not None:
+        q = q.filter(RequestLog.created_at <= to_date)
+    total = q.count()
+    rows = q.order_by(RequestLog.created_at.desc()).offset(offset).limit(limit).all()
+    return rows, total
+
+
+def query_audit_logs(
+    db: Session,
+    action: Optional[str] = None,
+    user_id: Optional[int] = None,
+    severity: Optional[str] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Tuple[List[AuditLog], int]:
+    q = db.query(AuditLog)
+    if action is not None:
+        q = q.filter(AuditLog.action == action)
+    if user_id is not None:
+        q = q.filter(AuditLog.user_id == user_id)
+    if severity is not None:
+        q = q.filter(AuditLog.severity == severity)
+    if from_date is not None:
+        q = q.filter(AuditLog.created_at >= from_date)
+    if to_date is not None:
+        q = q.filter(AuditLog.created_at <= to_date)
+    total = q.count()
+    rows = q.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    return rows, total
+
+
+def get_request_stats(
+    db: Session,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    project_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    q = db.query(RequestLog)
+    if project_id is not None:
+        q = q.filter(RequestLog.project_id == project_id)
+    if from_date is not None:
+        q = q.filter(RequestLog.created_at >= from_date)
+    if to_date is not None:
+        q = q.filter(RequestLog.created_at <= to_date)
+
+    totals = q.with_entities(
+        func.count(RequestLog.id),
+        func.sum(RequestLog.prompt_tokens),
+        func.sum(RequestLog.completion_tokens),
+        func.sum(RequestLog.total_tokens),
+        func.sum(RequestLog.cost_usd),
+        func.avg(RequestLog.latency_ms),
+    ).first()
+
+    by_model = q.with_entities(
+        RequestLog.model,
+        func.count(RequestLog.id),
+        func.sum(RequestLog.total_tokens),
+        func.sum(RequestLog.cost_usd),
+        func.avg(RequestLog.latency_ms),
+    ).group_by(RequestLog.model).all()
+
+    by_status = q.with_entities(
+        RequestLog.status_code,
+        func.count(RequestLog.id),
+    ).group_by(RequestLog.status_code).all()
+
+    return {
+        "total_requests": totals[0] or 0,
+        "total_prompt_tokens": int(totals[1] or 0),
+        "total_completion_tokens": int(totals[2] or 0),
+        "total_tokens": int(totals[3] or 0),
+        "total_cost_usd": round(float(totals[4] or 0), 6),
+        "avg_latency_ms": round(float(totals[5] or 0), 1),
+        "by_model": [
+            {
+                "model": r[0],
+                "requests": r[1],
+                "total_tokens": int(r[2] or 0),
+                "cost_usd": round(float(r[3] or 0), 6),
+                "avg_latency_ms": round(float(r[4] or 0), 1),
+            }
+            for r in by_model
+        ],
+        "by_status": {str(r[0]): r[1] for r in by_status},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Model Pricing
+# ---------------------------------------------------------------------------
+
+def get_model_pricing(db: Session, model_name: str) -> Optional[ModelPricing]:
+    return db.query(ModelPricing).filter(ModelPricing.model_name == model_name).first()
+
+
+def list_model_pricing(db: Session) -> List[ModelPricing]:
+    return db.query(ModelPricing).order_by(ModelPricing.model_name).all()
+
+
+def upsert_model_pricing(
+    db: Session,
+    model_name: str,
+    input_per_1m: float,
+    output_per_1m: float,
+    currency: str = "USD",
+    notes: Optional[str] = None,
+) -> ModelPricing:
+    existing = get_model_pricing(db, model_name)
+    if existing:
+        existing.input_per_1m = input_per_1m
+        existing.output_per_1m = output_per_1m
+        existing.currency = currency
+        existing.notes = notes
+        existing.updated_at = datetime.utcnow()
+    else:
+        existing = ModelPricing(
+            model_name=model_name,
+            input_per_1m=input_per_1m,
+            output_per_1m=output_per_1m,
+            currency=currency,
+            notes=notes,
+        )
+        db.add(existing)
+    db.commit()
+    db.refresh(existing)
+    return existing
+
+
+def delete_model_pricing(db: Session, model_name: str) -> bool:
+    row = get_model_pricing(db, model_name)
+    if not row:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
+def compute_cost(db: Session, model_name: str, prompt_tokens: int, completion_tokens: int) -> Optional[float]:
+    pricing = get_model_pricing(db, model_name)
+    if not pricing:
+        return None
+    cost = (prompt_tokens / 1_000_000) * pricing.input_per_1m + \
+           (completion_tokens / 1_000_000) * pricing.output_per_1m
+    return round(cost, 8)
 
 
 # ---------------------------------------------------------------------------

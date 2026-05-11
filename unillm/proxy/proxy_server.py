@@ -12,14 +12,18 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import yaml
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from unillm import __version__
 from unillm._logging import verbose_proxy_logger, set_verbose
-from unillm.proxy.auth import user_api_key_auth, set_general_settings
+from unillm.db import get_db
+from unillm.db.database import init_db
+from unillm.db import crud
+from unillm.proxy.auth import user_api_key_auth, set_general_settings, enforce_model_access
+from unillm.proxy.api_routes import router as api_router
 from unillm.types import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -132,7 +136,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     verbose_proxy_logger.info(f"UniLLM Proxy v{__version__} starting...")
-    
+
+    # Initialize database
+    init_db()
+
     # Load config if provided
     config_path = os.getenv("UNILLM_CONFIG", "")
     if config_path and os.path.exists(config_path):
@@ -166,6 +173,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Management API routes
+app.include_router(api_router)
 
 
 # Health check endpoint
@@ -319,34 +329,41 @@ async def _rewrite_model_in_stream(stream, model_alias: str):
 
 
 # Chat completions endpoint
-@app.post("/v1/chat/completions", dependencies=[Depends(user_api_key_auth)])
-@app.post("/chat/completions", dependencies=[Depends(user_api_key_auth)])
+@app.post("/v1/chat/completions")
+@app.post("/chat/completions")
 async def chat_completions(
     request_body: ChatCompletionRequest,
+    background_tasks: BackgroundTasks,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    db: Session = Depends(get_db),
 ):
     """
     Create a chat completion.
-    
+
     Follows the OpenAI Chat Completions API specification.
     https://platform.openai.com/docs/api-reference/chat/create
     """
+    start_time = time.time()
+
     # Extract parameters from request body
     model = request_body.model
+    labels = request_body.labels  # captured before forwarding (UniLLM-only field)
     messages = [msg.model_dump(exclude_none=True) for msg in request_body.messages]
     stream = request_body.stream or False
     temperature = request_body.temperature
     top_p = request_body.top_p
     max_tokens = request_body.max_tokens
     stop = request_body.stop
-    
+
+    enforce_model_access(user_api_key_dict, model)
+
     # Get handler and model config
     handler = _get_handler_for_model(model)
     actual_model = _get_actual_model_name(model)
     model_params = _get_model_params(model)
-    
+
     verbose_proxy_logger.debug(f"Chat completion request for model: {model} -> {actual_model}")
-    
+
     try:
         # Build kwargs for handler - include kms_key_name if present (for vertex-ai-kms)
         handler_kwargs = {
@@ -360,14 +377,23 @@ async def chat_completions(
             "project": model_params.get("project"),
             "location": model_params.get("location"),
         }
-        
+
         # Add kms_key_name if present (for vertex-ai-kms handler)
         if model_params.get("kms_key_name"):
             handler_kwargs["kms_key_name"] = model_params.get("kms_key_name")
-        
+
         response = await handler.chat_completion(**handler_kwargs)
-        
+
         if stream:
+            latency_ms = int((time.time() - start_time) * 1000)
+            background_tasks.add_task(
+                crud.create_request_log,
+                db=db, model=model,
+                project_id=user_api_key_dict.project_id,
+                api_key_name=user_api_key_dict.api_key_name,
+                ssh_username=user_api_key_dict.ssh_username,
+                labels=labels, latency_ms=latency_ms, status_code=200,
+            )
             return StreamingResponse(
                 _rewrite_model_in_stream(response, model),
                 media_type="text/event-stream",
@@ -375,6 +401,21 @@ async def chat_completions(
         else:
             # Update model name in response to match request
             response.model = model
+
+            usage = response.usage
+            prompt_tokens = usage.prompt_tokens if usage else 0
+            completion_tokens = usage.completion_tokens if usage else 0
+            latency_ms = int((time.time() - start_time) * 1000)
+            background_tasks.add_task(
+                crud.create_request_log,
+                db=db, model=model,
+                project_id=user_api_key_dict.project_id,
+                api_key_name=user_api_key_dict.api_key_name,
+                ssh_username=user_api_key_dict.ssh_username,
+                labels=labels,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                latency_ms=latency_ms, status_code=200,
+            )
 
             # Convert to dict to add SSH info
             response_dict = response.model_dump()
@@ -396,18 +437,22 @@ async def chat_completions(
 
 
 # Text completions endpoint
-@app.post("/v1/completions", dependencies=[Depends(user_api_key_auth)])
-@app.post("/completions", dependencies=[Depends(user_api_key_auth)])
+@app.post("/v1/completions")
+@app.post("/completions")
 async def completions(
     request_body: CompletionRequest,
+    background_tasks: BackgroundTasks,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    db: Session = Depends(get_db),
 ):
     """
     Create a text completion.
-    
+
     Follows the OpenAI Completions API specification.
     https://platform.openai.com/docs/api-reference/completions/create
     """
+    start_time = time.time()
+
     # Extract parameters from request body
     model = request_body.model
     prompt = request_body.prompt
@@ -416,14 +461,16 @@ async def completions(
     top_p = request_body.top_p
     max_tokens = request_body.max_tokens
     stop = request_body.stop
-    
+
+    enforce_model_access(user_api_key_dict, model)
+
     # Get handler and model config
     handler = _get_handler_for_model(model)
     actual_model = _get_actual_model_name(model)
     model_params = _get_model_params(model)
-    
+
     verbose_proxy_logger.debug(f"Text completion request for model: {model} -> {actual_model}")
-    
+
     try:
         # Build kwargs for handler - include kms_key_name if present (for vertex-ai-kms)
         handler_kwargs = {
@@ -437,14 +484,23 @@ async def completions(
             "project": model_params.get("project"),
             "location": model_params.get("location"),
         }
-        
+
         # Add kms_key_name if present (for vertex-ai-kms handler)
         if model_params.get("kms_key_name"):
             handler_kwargs["kms_key_name"] = model_params.get("kms_key_name")
-        
+
         response = await handler.text_completion(**handler_kwargs)
-        
+
         if stream:
+            latency_ms = int((time.time() - start_time) * 1000)
+            background_tasks.add_task(
+                crud.create_request_log,
+                db=db, model=model,
+                project_id=user_api_key_dict.project_id,
+                api_key_name=user_api_key_dict.api_key_name,
+                ssh_username=user_api_key_dict.ssh_username,
+                latency_ms=latency_ms, status_code=200,
+            )
             return StreamingResponse(
                 _rewrite_model_in_stream(response, model),
                 media_type="text/event-stream",
@@ -452,6 +508,20 @@ async def completions(
         else:
             # Update model name in response to match request
             response.model = model
+
+            usage = response.usage
+            prompt_tokens = usage.prompt_tokens if usage else 0
+            completion_tokens = usage.completion_tokens if usage else 0
+            latency_ms = int((time.time() - start_time) * 1000)
+            background_tasks.add_task(
+                crud.create_request_log,
+                db=db, model=model,
+                project_id=user_api_key_dict.project_id,
+                api_key_name=user_api_key_dict.api_key_name,
+                ssh_username=user_api_key_dict.ssh_username,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                latency_ms=latency_ms, status_code=200,
+            )
 
             # Convert to dict to add SSH info
             response_dict = response.model_dump()

@@ -8,6 +8,7 @@ from datetime import datetime
 import time
 
 
+
 class Message(BaseModel):
     """OpenAI-compatible message format"""
     role: Literal["system", "user", "assistant", "function", "tool"]
@@ -40,6 +41,7 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)")
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
     user: Optional[str] = Field(None, description="Unique user identifier")
+    labels: Optional[Dict[str, str]] = Field(None, description="Optional labels for request logging (UniLLM-only, not forwarded to backends)")
 
     model_config = {
         "json_schema_extra": {
@@ -165,6 +167,10 @@ class UserAPIKeyAuth(BaseModel):
     api_key: str
     valid: bool = True
     user_id: Optional[str] = None
+    # DB-resolved fields
+    project_id: Optional[int] = None
+    api_key_name: Optional[str] = None
+    allowed_models: Optional[List[str]] = None  # None = env-var key (no model restriction)
     # SSH verification fields
     ssh_verified: bool = False
     ssh_username: Optional[str] = None

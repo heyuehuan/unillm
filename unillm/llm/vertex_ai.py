@@ -188,14 +188,18 @@ class VertexAIHandler:
                 finish_reason=finish_reason
             ))
         
+        prompt_tokens = usage_metadata.get("promptTokenCount", 0)
+        completion_tokens = usage_metadata.get("candidatesTokenCount", 0)
+        total_tokens = usage_metadata.get("totalTokenCount", prompt_tokens + completion_tokens)
+
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
             model=model,
             choices=choices,
             usage=Usage(
-                prompt_tokens=usage_metadata.get("promptTokenCount", 0),
-                completion_tokens=usage_metadata.get("candidatesTokenCount", 0),
-                total_tokens=usage_metadata.get("totalTokenCount", 0),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
             )
         )
     
@@ -312,12 +316,12 @@ class VertexAIHandler:
         for i, candidate in enumerate(candidates):
             content = candidate.get("content", {})
             parts = content.get("parts", [])
-            
+
             delta = {}
-            for part in parts:
-                if "text" in part:
-                    delta["content"] = part["text"]
-            
+            text_parts = [part["text"] for part in parts if "text" in part]
+            if text_parts:
+                delta["content"] = "".join(text_parts)
+
             finish_reason = candidate.get("finishReason")
             if finish_reason:
                 finish_reason_map = {
@@ -333,13 +337,25 @@ class VertexAIHandler:
                 "finish_reason": finish_reason,
             })
         
-        return {
+        chunk = {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
             "choices": choices,
         }
+
+        usage_metadata = gemini_chunk.get("usageMetadata", {})
+        if usage_metadata:
+            prompt = usage_metadata.get("promptTokenCount", 0)
+            completion = usage_metadata.get("candidatesTokenCount", 0)
+            chunk["usage"] = {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": usage_metadata.get("totalTokenCount", prompt + completion),
+            }
+
+        return chunk
     
     async def text_completion(
         self,

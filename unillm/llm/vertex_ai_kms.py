@@ -318,8 +318,11 @@ class VertexAIKMSHandler:
                     generation_config=generation_config if generation_config else None,
                     stream=True,
                 )
-            
+
+            last_usage_metadata = None
             for chunk in response_stream:
+                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                    last_usage_metadata = chunk.usage_metadata
                 if chunk.candidates:
                     for candidate in chunk.candidates:
                         if candidate.content and candidate.content.parts:
@@ -337,8 +340,8 @@ class VertexAIKMSHandler:
                                         }],
                                     }
                                     yield f"data: {json.dumps(openai_chunk)}\n\n"
-            
-            # Send final chunk with finish_reason
+
+            # Send final chunk with finish_reason and usage
             final_chunk = {
                 "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
                 "object": "chat.completion.chunk",
@@ -350,6 +353,14 @@ class VertexAIKMSHandler:
                     "finish_reason": "stop",
                 }],
             }
+            if last_usage_metadata:
+                prompt = getattr(last_usage_metadata, 'prompt_token_count', 0)
+                completion = getattr(last_usage_metadata, 'candidates_token_count', 0)
+                final_chunk["usage"] = {
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": getattr(last_usage_metadata, 'total_token_count', prompt + completion),
+                }
             yield f"data: {json.dumps(final_chunk)}\n\n"
             yield "data: [DONE]\n\n"
             

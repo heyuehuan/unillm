@@ -293,17 +293,13 @@ class VertexAIHandler:
             async for line in response.aiter_lines():
                 if line.startswith("data: "):
                     data = line[6:]
-                    if data.strip() == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                        break
-                    
                     try:
                         gemini_chunk = json.loads(data)
                         openai_chunk = self._convert_stream_chunk(gemini_chunk, model)
                         yield f"data: {json.dumps(openai_chunk)}\n\n"
                     except json.JSONDecodeError:
                         continue
-            
+
             yield "data: [DONE]\n\n"
     
     def _convert_stream_chunk(

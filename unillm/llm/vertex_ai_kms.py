@@ -16,11 +16,17 @@ Usage in config:
         project: my-project
         location: us-central1
         kms_key_name: projects/PROJECT_ID/locations/LOCATION_ID/keyRings/KEY_RING/cryptoKeys/KEY_NAME
+
+Note: vertexai.init() is a process-global call. Only one (project, location, kms_key_name)
+combination can be active at a time. If multiple KMS models with different projects or
+locations are configured, they will re-initialize the global SDK on each switch.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
@@ -39,14 +45,48 @@ from unillm.types import (
 )
 
 
+# vertexai.init() sets process-global state. Track what's currently initialized
+# so we only re-init when the config actually changes.
+_global_vertexai_lock = threading.Lock()
+_global_vertexai_config: Optional[tuple] = None  # (project, location, kms_key_name)
+
+
+def _ensure_vertexai_initialized(
+    project: Optional[str],
+    location: str,
+    kms_key_name: Optional[str],
+) -> bool:
+    """
+    Call vertexai.init() only when the config has changed. Returns True if re-initialized.
+    Uses a lock because multiple async tasks can trigger this concurrently.
+    """
+    global _global_vertexai_config
+    config = (project, location, kms_key_name)
+    with _global_vertexai_lock:
+        if _global_vertexai_config == config:
+            return False
+        verbose_proxy_logger.info(
+            f"Initializing Vertex AI SDK: project={project}, location={location}, "
+            f"kms_key_name={kms_key_name}"
+        )
+        vertexai.init(
+            project=project,
+            location=location,
+            encryption_spec_key_name=kms_key_name,
+        )
+        _global_vertexai_config = config
+        verbose_proxy_logger.info("Vertex AI SDK initialized with CMEK configuration")
+        return True
+
+
 class VertexAIKMSHandler:
     """
     Handler for Vertex AI Gemini API calls with CMEK support using the Vertex AI SDK.
-    
+
     Uses vertexai.init() with encryption_spec_key_name to configure CMEK
     at the SDK level for all supported operations.
     """
-    
+
     def __init__(
         self,
         project: Optional[str] = None,
@@ -55,7 +95,7 @@ class VertexAIKMSHandler:
     ):
         """
         Initialize VertexAIKMSHandler with CMEK configuration.
-        
+
         Args:
             project: Google Cloud project ID
             location: Vertex AI location (default: us-central1)
@@ -65,37 +105,19 @@ class VertexAIKMSHandler:
         self.project = project
         self.location = location
         self.kms_key_name = kms_key_name
-        self._initialized = False
         self._models: Dict[str, GenerativeModel] = {}
-    
-    def _ensure_initialized(self):
-        """Initialize the Vertex AI SDK with CMEK configuration"""
-        if self._initialized:
-            return
-        
-        verbose_proxy_logger.info(
-            f"Initializing Vertex AI SDK with project={self.project}, "
-            f"location={self.location}, kms_key_name={self.kms_key_name}"
-        )
-        
-        # Initialize Vertex AI with CMEK
-        vertexai.init(
-            project=self.project,
-            location=self.location,
-            encryption_spec_key_name=self.kms_key_name,
-        )
-        
-        self._initialized = True
-        verbose_proxy_logger.info("Vertex AI SDK initialized with CMEK configuration")
-    
-    def _get_model(self, model_name: str) -> GenerativeModel:
-        """Get or create a GenerativeModel instance"""
+
+    def _get_model(self, model_name: str, project: Optional[str], location: str, kms_key_name: Optional[str]) -> GenerativeModel:
+        """Get or create a GenerativeModel, re-initializing the SDK if config changed."""
+        reinited = _ensure_vertexai_initialized(project, location, kms_key_name)
+        if reinited:
+            # Global config changed — cached models were created under old config.
+            self._models.clear()
         if model_name not in self._models:
-            self._ensure_initialized()
             self._models[model_name] = GenerativeModel(model_name)
             verbose_proxy_logger.debug(f"Created GenerativeModel for {model_name}")
         return self._models[model_name]
-    
+
     def _convert_messages_to_contents(
         self, messages: List[Dict[str, Any]]
     ) -> tuple[Optional[str], List[Content]]:
@@ -105,21 +127,18 @@ class VertexAIKMSHandler:
         """
         system_instruction = None
         contents = []
-        
+
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            
+
             if role == "system":
-                # System messages become system_instruction
                 if isinstance(content, str):
                     system_instruction = content
                 continue
-            
-            # Map OpenAI roles to Vertex AI roles
+
             vertex_role = "user" if role == "user" else "model"
-            
-            # Convert content to parts
+
             parts = []
             if isinstance(content, str):
                 parts.append(Part.from_text(content))
@@ -129,17 +148,16 @@ class VertexAIKMSHandler:
                         if item.get("type") == "text":
                             parts.append(Part.from_text(item.get("text", "")))
                         elif item.get("type") == "image_url":
-                            # Handle image content - for now just skip
                             # TODO: Add proper image handling
                             pass
                     else:
                         parts.append(Part.from_text(str(item)))
-            
+
             if parts:
                 contents.append(Content(role=vertex_role, parts=parts))
-        
+
         return system_instruction, contents
-    
+
     def _build_generation_config(
         self,
         temperature: Optional[float] = None,
@@ -149,7 +167,7 @@ class VertexAIKMSHandler:
     ) -> Dict[str, Any]:
         """Build Vertex AI generation config from OpenAI parameters"""
         config = {}
-        
+
         if temperature is not None:
             config["temperature"] = temperature
         if top_p is not None:
@@ -161,34 +179,32 @@ class VertexAIKMSHandler:
                 config["stop_sequences"] = [stop]
             else:
                 config["stop_sequences"] = stop
-        
+
         return config
-    
+
     def _convert_response_to_openai(
         self, response: Any, model: str
     ) -> ChatCompletionResponse:
         """Convert Vertex AI response to OpenAI format"""
         choices = []
-        
+
         for i, candidate in enumerate(response.candidates):
-            # Extract text from parts
             text_parts = []
             if candidate.content and candidate.content.parts:
                 for part in candidate.content.parts:
                     if hasattr(part, 'text') and part.text:
                         text_parts.append(part.text)
-            
-            # Map finish reasons
+
             finish_reason = "stop"
             if hasattr(candidate, 'finish_reason'):
                 finish_reason_map = {
-                    1: "stop",      # STOP
-                    2: "length",    # MAX_TOKENS
-                    3: "content_filter",  # SAFETY
-                    4: "content_filter",  # RECITATION
+                    1: "stop",
+                    2: "length",
+                    3: "content_filter",
+                    4: "content_filter",
                 }
                 finish_reason = finish_reason_map.get(candidate.finish_reason, "stop")
-            
+
             choices.append(Choice(
                 index=i,
                 message=Message(
@@ -197,23 +213,24 @@ class VertexAIKMSHandler:
                 ),
                 finish_reason=finish_reason
             ))
-        
-        # Extract usage metadata
+
         usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            prompt = getattr(response.usage_metadata, 'prompt_token_count', 0)
+            completion = getattr(response.usage_metadata, 'candidates_token_count', 0)
             usage = Usage(
-                prompt_tokens=getattr(response.usage_metadata, 'prompt_token_count', 0),
-                completion_tokens=getattr(response.usage_metadata, 'candidates_token_count', 0),
-                total_tokens=getattr(response.usage_metadata, 'total_token_count', 0),
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                total_tokens=getattr(response.usage_metadata, 'total_token_count', prompt + completion),
             )
-        
+
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
             model=model,
             choices=choices,
             usage=usage
         )
-    
+
     async def chat_completion(
         self,
         model: str,
@@ -230,97 +247,93 @@ class VertexAIKMSHandler:
     ) -> Union[ChatCompletionResponse, AsyncIterator[str]]:
         """
         Make a chat completion request to Vertex AI Gemini with CMEK support.
-        
-        Uses the Vertex AI SDK which has been initialized with encryption_spec_key_name.
         """
-        # Override project/location/kms if provided
-        if project and project != self.project:
-            self.project = project
-            self._initialized = False
-        if location and location != self.location:
-            self.location = location
-            self._initialized = False
-        if kms_key_name and kms_key_name != self.kms_key_name:
-            self.kms_key_name = kms_key_name
-            self._initialized = False
-        
-        # Get the model (this ensures SDK is initialized)
-        generative_model = self._get_model(model)
-        
-        # Convert messages to Vertex AI format
+        # Resolve effective config from per-call overrides or instance defaults.
+        # Never mutate self.* — these are local to this call only.
+        effective_project = project or self.project
+        effective_location = location or self.location
+        effective_kms_key_name = kms_key_name or self.kms_key_name
+
+        generative_model = self._get_model(model, effective_project, effective_location, effective_kms_key_name)
+
         system_instruction, contents = self._convert_messages_to_contents(messages)
-        
-        # Build generation config
         generation_config = self._build_generation_config(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop,
         )
-        
+
         verbose_proxy_logger.debug(f"Vertex AI KMS request for model: {model}")
         verbose_proxy_logger.debug(f"System instruction: {system_instruction}")
         verbose_proxy_logger.debug(f"Contents count: {len(contents)}")
         verbose_proxy_logger.debug(f"Generation config: {generation_config}")
-        
+
+        model_obj = (
+            GenerativeModel(model, system_instruction=system_instruction)
+            if system_instruction
+            else generative_model
+        )
+
         try:
             if stream:
-                return self._stream_response(
-                    generative_model, contents, system_instruction, generation_config, model
-                )
+                return self._stream_response(model_obj, contents, generation_config, model)
             else:
-                # Use generate_content with system_instruction if provided
-                if system_instruction:
-                    # Create a new model with system instruction
-                    model_with_system = GenerativeModel(
-                        model,
-                        system_instruction=system_instruction,
-                    )
-                    response = model_with_system.generate_content(
+                response = await asyncio.to_thread(
+                    lambda: model_obj.generate_content(
                         contents,
-                        generation_config=generation_config if generation_config else None,
+                        generation_config=generation_config or None,
                     )
-                else:
-                    response = generative_model.generate_content(
-                        contents,
-                        generation_config=generation_config if generation_config else None,
-                    )
-                
+                )
                 return self._convert_response_to_openai(response, model)
-        
+
         except Exception as e:
             verbose_proxy_logger.error(f"Vertex AI KMS error: {e}")
             raise
-    
+
     async def _stream_response(
         self,
-        generative_model: GenerativeModel,
+        model_obj: GenerativeModel,
         contents: List[Content],
-        system_instruction: Optional[str],
         generation_config: Dict[str, Any],
         model: str,
     ) -> AsyncIterator[str]:
-        """Stream response from Vertex AI"""
-        try:
-            if system_instruction:
-                model_with_system = GenerativeModel(
-                    model,
-                    system_instruction=system_instruction,
-                )
-                response_stream = model_with_system.generate_content(
-                    contents,
-                    generation_config=generation_config if generation_config else None,
-                    stream=True,
-                )
-            else:
-                response_stream = generative_model.generate_content(
-                    contents,
-                    generation_config=generation_config if generation_config else None,
-                    stream=True,
-                )
+        """
+        Stream response from Vertex AI.
 
-            last_usage_metadata = None
-            for chunk in response_stream:
+        The Vertex AI SDK's streaming iterator is synchronous, so we run it in a
+        background thread and bridge chunks to the async generator via a Queue.
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        _sentinel = object()
+
+        def _produce():
+            try:
+                stream = model_obj.generate_content(
+                    contents,
+                    generation_config=generation_config or None,
+                    stream=True,
+                )
+                for chunk in stream:
+                    asyncio.run_coroutine_threadsafe(queue.put(chunk), loop).result()
+            except Exception as exc:
+                asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
+            finally:
+                asyncio.run_coroutine_threadsafe(queue.put(_sentinel), loop).result()
+
+        thread = threading.Thread(target=_produce, daemon=True)
+        thread.start()
+
+        last_usage_metadata = None
+        try:
+            while True:
+                item = await queue.get()
+                if item is _sentinel:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                chunk = item
                 if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
                     last_usage_metadata = chunk.usage_metadata
                 if chunk.candidates:
@@ -340,34 +353,31 @@ class VertexAIKMSHandler:
                                         }],
                                     }
                                     yield f"data: {json.dumps(openai_chunk)}\n\n"
+        finally:
+            thread.join(timeout=30)
 
-            # Send final chunk with finish_reason and usage
-            final_chunk = {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop",
-                }],
+        final_chunk = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+        }
+        if last_usage_metadata:
+            prompt = getattr(last_usage_metadata, 'prompt_token_count', 0)
+            completion = getattr(last_usage_metadata, 'candidates_token_count', 0)
+            final_chunk["usage"] = {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": getattr(last_usage_metadata, 'total_token_count', prompt + completion),
             }
-            if last_usage_metadata:
-                prompt = getattr(last_usage_metadata, 'prompt_token_count', 0)
-                completion = getattr(last_usage_metadata, 'candidates_token_count', 0)
-                final_chunk["usage"] = {
-                    "prompt_tokens": prompt,
-                    "completion_tokens": completion,
-                    "total_tokens": getattr(last_usage_metadata, 'total_token_count', prompt + completion),
-                }
-            yield f"data: {json.dumps(final_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-            
-        except Exception as e:
-            verbose_proxy_logger.error(f"Vertex AI KMS streaming error: {e}")
-            raise
-    
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
     async def text_completion(
         self,
         model: str,
@@ -386,13 +396,11 @@ class VertexAIKMSHandler:
         Make a text completion request to Vertex AI Gemini with CMEK support.
         Converts the prompt to a chat format internally.
         """
-        # Convert prompt to messages format
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         else:
             messages = [{"role": "user", "content": prompt[0] if prompt else ""}]
-        
-        # Call chat completion
+
         response = await self.chat_completion(
             model=model,
             messages=messages,
@@ -406,12 +414,12 @@ class VertexAIKMSHandler:
             kms_key_name=kms_key_name,
             **kwargs,
         )
-        
+
         if stream:
             return self._convert_chat_stream_to_text_stream(response, model)
         else:
             return self._convert_chat_to_text_response(response, model)
-    
+
     def _convert_chat_to_text_response(
         self, chat_response: ChatCompletionResponse, model: str
     ) -> CompletionResponse:
@@ -426,14 +434,14 @@ class VertexAIKMSHandler:
                 text=text,
                 finish_reason=choice.finish_reason,
             ))
-        
+
         return CompletionResponse(
             id=chat_response.id.replace("chatcmpl-", "cmpl-"),
             model=model,
             choices=text_choices,
             usage=chat_response.usage,
         )
-    
+
     async def _convert_chat_stream_to_text_stream(
         self, chat_stream: AsyncIterator[str], model: str
     ) -> AsyncIterator[str]:
@@ -444,7 +452,7 @@ class VertexAIKMSHandler:
                 if data == "[DONE]":
                     yield "data: [DONE]\n\n"
                     break
-                
+
                 try:
                     chat_chunk = json.loads(data)
                     text_chunk = {
@@ -464,11 +472,10 @@ class VertexAIKMSHandler:
                     yield f"data: {json.dumps(text_chunk)}\n\n"
                 except json.JSONDecodeError:
                     continue
-    
+
     async def close(self):
-        """Close the handler (no resources to clean up for SDK-based handler)"""
+        """Close the handler"""
         self._models.clear()
-        self._initialized = False
 
 
 # Global handler instance

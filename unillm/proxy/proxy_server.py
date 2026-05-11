@@ -31,11 +31,13 @@ from unillm.types import (
 )
 from unillm.llm.vertex_ai import VertexAIHandler
 from unillm.llm.vertex_ai_kms import VertexAIKMSHandler
+from unillm.llm.vllm import VLLMHandler
 
 
 # Model type constants
 MODEL_TYPE_VERTEX_AI = "vertex-ai"
 MODEL_TYPE_VERTEX_AI_KMS = "vertex-ai-kms"
+MODEL_TYPE_VLLM = "vllm"
 
 # Global configuration
 model_list: List[Dict[str, Any]] = []
@@ -94,6 +96,15 @@ class ProxyConfig:
                 )
                 verbose_proxy_logger.info(
                     f"Initialized KMS handler for model '{model_name}' with KMS key"
+                )
+            elif model_type == MODEL_TYPE_VLLM:
+                vertex_handlers[model_name] = VLLMHandler(
+                    base_url=unillm_params.get("base_url", "http://localhost:8000"),
+                    api_key=unillm_params.get("api_key"),
+                )
+                verbose_proxy_logger.info(
+                    f"Initialized vLLM handler for model '{model_name}' "
+                    f"at {unillm_params.get('base_url', 'http://localhost:8000')}"
                 )
             else:
                 # Default: vertex-ai
@@ -252,6 +263,11 @@ def _get_handler_for_model(model_name: str) -> VertexAIHandler:
                 project=params.get("project"),
                 location=params.get("location", "us-central1"),
                 kms_key_name=params.get("kms_key_name"),
+            )
+        elif model_type == MODEL_TYPE_VLLM:
+            return VLLMHandler(
+                base_url=params.get("base_url", "http://localhost:8000"),
+                api_key=params.get("api_key"),
             )
         else:
             return VertexAIHandler(

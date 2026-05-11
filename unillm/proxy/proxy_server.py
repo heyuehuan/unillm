@@ -284,6 +284,24 @@ def _get_model_params(model_name: str) -> Dict[str, Any]:
     return {}
 
 
+async def _rewrite_model_in_stream(stream, model_alias: str):
+    """Rewrite the model field in each SSE chunk to use the configured alias."""
+    async for chunk in stream:
+        if chunk.startswith("data: "):
+            data = chunk[6:].strip()
+            if data == "[DONE]":
+                yield chunk
+                continue
+            try:
+                parsed = json.loads(data)
+                parsed["model"] = model_alias
+                yield f"data: {json.dumps(parsed)}\n\n"
+            except json.JSONDecodeError:
+                yield chunk
+        else:
+            yield chunk
+
+
 # Chat completions endpoint
 @app.post("/v1/chat/completions", dependencies=[Depends(user_api_key_auth)])
 @app.post("/chat/completions", dependencies=[Depends(user_api_key_auth)])
@@ -335,24 +353,24 @@ async def chat_completions(
         
         if stream:
             return StreamingResponse(
-                response,
+                _rewrite_model_in_stream(response, model),
                 media_type="text/event-stream",
             )
         else:
             # Update model name in response to match request
             response.model = model
-            
+
             # Convert to dict to add SSH info
             response_dict = response.model_dump()
-            
+
             # Add SSH verification info if available
             if user_api_key_dict.ssh_username:
                 response_dict["user"] = user_api_key_dict.ssh_username
             if user_api_key_dict.ssh_warning:
                 response_dict["warning"] = user_api_key_dict.ssh_warning
-            
+
             return response_dict
-    
+
     except Exception as e:
         verbose_proxy_logger.exception(f"Error in chat completion: {e}")
         raise HTTPException(
@@ -412,24 +430,24 @@ async def completions(
         
         if stream:
             return StreamingResponse(
-                response,
+                _rewrite_model_in_stream(response, model),
                 media_type="text/event-stream",
             )
         else:
             # Update model name in response to match request
             response.model = model
-            
+
             # Convert to dict to add SSH info
             response_dict = response.model_dump()
-            
+
             # Add SSH verification info if available
             if user_api_key_dict.ssh_username:
                 response_dict["user"] = user_api_key_dict.ssh_username
             if user_api_key_dict.ssh_warning:
                 response_dict["warning"] = user_api_key_dict.ssh_warning
-            
+
             return response_dict
-    
+
     except Exception as e:
         verbose_proxy_logger.exception(f"Error in text completion: {e}")
         raise HTTPException(

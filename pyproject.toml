@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "unillm"
+version = "0.1.0"
+description = "A minimal OpenAI-compatible LLM proxy for Vertex AI and vLLM"
+requires-python = ">=3.10"
+dependencies = [
+    # Core
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "click>=8.0.0",
+    "httpx>=0.24.0",
+    "PyYAML>=6.0",
+    # Vertex AI
+    "google-auth>=2.0.0",
+    "google-auth-oauthlib>=1.0.0",
+    "google-cloud-aiplatform>=1.47.0",
+    # SSH signature verification
+    "cryptography>=41.0.0",
+    # Database
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    # Auth
+    "bcrypt>=4.0.0",
+    "python-jose[cryptography]>=3.3.0",
+]
+
+[project.scripts]
+unillm = "unillm.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["unillm"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+]

@@ -11,11 +11,13 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
     hashed_password: Mapped[str] = mapped_column(String, nullable=False)
     global_role: Mapped[str] = mapped_column(String, default="user")  # user | admin
     personal_project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    password_login_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     ssh_keys: Mapped[List["SSHKey"]] = relationship("SSHKey", back_populates="user", cascade="all, delete-orphan")
@@ -55,6 +57,7 @@ class APIKey(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     key_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)  # first 8 chars for display
+    key_ciphertext: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Fernet-encrypted plaintext
     # ["all"] = unrestricted, [] = no access, ["model-a", "model-b"] = specific models
     allowed_models: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: ["all"])
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -72,6 +75,7 @@ class SSHKey(Base):
     key_name: Mapped[str] = mapped_column(String, nullable=False)
     public_key: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="ssh_keys")
 

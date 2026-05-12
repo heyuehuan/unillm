@@ -38,10 +38,22 @@ dist/
 secrets.toml
 .env
 unillm_config.yaml
+proxy_config_test.yaml
 
-# Node/Frontend (if any)
-node_modules/
-*.lock
+# Node/Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Frontend build output
+unillm/static/
 
 # Misc
 *.tgz
+
+# SQLite databases
+*.db
+
+# Reference
+litellm/*
+docs/*
+tests/*

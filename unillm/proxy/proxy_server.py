@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional
 import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from unillm import __version__
@@ -198,9 +199,19 @@ async def health_check():
     return {"status": "healthy", "version": __version__}
 
 
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
+_STATIC_INDEX = os.path.join(_STATIC_DIR, "index.html")
+
+if os.path.isdir(_STATIC_DIR):
+    _assets_dir = os.path.join(_STATIC_DIR, "assets")
+    if os.path.isdir(_assets_dir):
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+
+
 @app.get("/")
 async def root():
-    """Root endpoint - redirects to docs"""
+    if os.path.isfile(_STATIC_INDEX):
+        return FileResponse(_STATIC_INDEX)
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/docs")
 
@@ -551,6 +562,13 @@ async def completions(
         _log(status_code=500, error_message=str(e))
         verbose_proxy_logger.exception(f"Error in text completion request_id={request_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    if os.path.isfile(_STATIC_INDEX):
+        return FileResponse(_STATIC_INDEX)
+    raise HTTPException(status_code=404, detail="Not found")
 
 
 # Function to run the server

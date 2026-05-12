@@ -105,6 +105,12 @@ async def user_api_key_auth(
     # --- 1. DB lookup ---
     db_key = crud.get_api_key_by_value(db, original_api_key)
     if db_key:
+        owner = crud.get_project_owner(db, db_key.project_id)
+        if owner is not None and not owner.active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account has been disabled",
+            )
         crud.touch_api_key(db, db_key)
         auth_result = UserAPIKeyAuth(
             api_key=original_api_key,
@@ -161,6 +167,12 @@ async def _apply_ssh(
     auth_result.ssh_warning = ssh_result.warning
     if ssh_result.username:
         auth_result.user_id = ssh_result.username
+    if ssh_result.verified and ssh_result.key_name and ssh_result.username:
+        try:
+            from unillm.db.crud import touch_ssh_key_by_name
+            touch_ssh_key_by_name(db, ssh_result.key_name, ssh_result.username)
+        except Exception:
+            pass
     return auth_result
 
 

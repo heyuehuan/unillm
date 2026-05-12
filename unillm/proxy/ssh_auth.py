@@ -276,7 +276,7 @@ def verify_api_key_ssh(
             )
     
     # Load registered SSH keys
-    ssh_keys = load_ssh_keys()
+    ssh_keys = load_ssh_keys(db=db)
     
     # Check if key_name is registered
     if key_name not in ssh_keys:
@@ -340,10 +340,10 @@ def verify_api_key_ssh(
 def get_original_api_key(api_key: str) -> str:
     """
     Extract the original API key from a potentially SSH-signed key.
-    
+
     Args:
         api_key: The full API key (may contain SSH signature)
-        
+
     Returns:
         The original API key without SSH signature parts
     """

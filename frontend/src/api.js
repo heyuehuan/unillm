@@ -10,7 +10,10 @@ async function req(method, path, body) {
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (res.status === 401) {
+  // Session expiry: only force a reload when we actually had a token (i.e. a live
+  // session went stale). A 401 from the login call itself must surface as an error
+  // so the login form can show it — reloading there would loop.
+  if (res.status === 401 && token && path !== '/api/auth/login') {
     localStorage.removeItem('unillm_token')
     window.location.reload()
     return

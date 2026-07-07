@@ -53,7 +53,5 @@ unillm/static/
 # SQLite databases
 *.db
 
-# Reference
+# Reference (vendored upstream copy, not part of this project)
 litellm/*
-docs/*
-tests/*

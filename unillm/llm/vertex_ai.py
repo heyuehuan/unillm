@@ -40,21 +40,20 @@ class VertexAIHandler:
         self._credentials: Optional[Credentials] = None
         self._http_client: Optional[httpx.AsyncClient] = None
     
-    def _get_credentials(self) -> Credentials:
-        """Get or refresh Google Cloud credentials"""
+    def _get_credentials(self) -> Tuple[Credentials, Optional[str]]:
+        """Get or refresh Google Cloud credentials. Returns (credentials, adc_project)."""
+        adc_project = None
         if self._credentials is None:
-            self._credentials, project = google.auth.default(
+            self._credentials, adc_project = google.auth.default(
                 scopes=["https://www.googleapis.com/auth/cloud-platform"]
             )
-            if self.project is None:
-                self.project = project
-        
+
         # Refresh credentials if expired
         if self._credentials.expired or not self._credentials.token:
             request = google.auth.transport.requests.Request()
             self._credentials.refresh(request)
-        
-        return self._credentials
+
+        return self._credentials, adc_project
     
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create async HTTP client"""
@@ -62,16 +61,16 @@ class VertexAIHandler:
             self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
         return self._http_client
     
-    def _get_api_url(self, model: str, stream: bool = False) -> str:
+    def _get_api_url(self, model: str, project: str, location: str, stream: bool = False) -> str:
         """Build the Vertex AI API URL"""
         # Remove provider prefix if present
         if model.startswith("vertex_ai/"):
             model = model[len("vertex_ai/"):]
-        
+
         endpoint = "streamGenerateContent" if stream else "generateContent"
-        
-        base_url = f"https://{self.location}-aiplatform.googleapis.com/v1"
-        return f"{base_url}/projects/{self.project}/locations/{self.location}/publishers/google/models/{model}:{endpoint}"
+
+        base_url = f"https://{location}-aiplatform.googleapis.com/v1"
+        return f"{base_url}/projects/{project}/locations/{location}/publishers/google/models/{model}:{endpoint}"
     
     def _convert_messages_to_gemini_format(
         self, messages: List[Dict[str, Any]]
@@ -218,65 +217,57 @@ class VertexAIHandler:
     ) -> Union[ChatCompletionResponse, AsyncIterator[str]]:
         """
         Make a chat completion request to Vertex AI Gemini.
+
+        Effective project/location are resolved as call-locals (never written back to
+        self) so concurrent requests with different overrides can't interleave.
         """
-        # Use provided project/location or defaults
-        orig_project = self.project
-        orig_location = self.location
-        
-        if project:
-            self.project = project
-        if location:
-            self.location = location
-        
-        try:
-            # Get credentials
-            credentials = self._get_credentials()
-            
-            # Build request
-            system_instruction, contents = self._convert_messages_to_gemini_format(messages)
-            generation_config = self._build_generation_config(
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                stop=stop,
-            )
-            
-            request_body = {"contents": contents}
-            if system_instruction:
-                request_body["systemInstruction"] = system_instruction
-            if generation_config:
-                request_body["generationConfig"] = generation_config
-            
-            # Build URL
-            url = self._get_api_url(model, stream=stream)
-            if stream:
-                url += "?alt=sse"
-            
-            # Make request
-            headers = {
-                "Authorization": f"Bearer {credentials.token}",
-                "Content-Type": "application/json",
-            }
-            
-            client = await self._get_http_client()
-            
-            verbose_proxy_logger.debug(f"Vertex AI request URL: {url}")
-            verbose_proxy_logger.debug(f"Vertex AI request body: {json.dumps(request_body)[:500]}...")
-            
-            if stream:
-                return self._stream_response(client, url, headers, request_body, model)
-            else:
-                response = await client.post(url, headers=headers, json=request_body)
-                if response.status_code != 200:
-                    error_text = response.text
-                    verbose_proxy_logger.error(f"Vertex AI error response: {error_text}")
-                response.raise_for_status()
-                gemini_response = response.json()
-                return self._convert_gemini_response_to_openai(gemini_response, model)
-        
-        finally:
-            self.project = orig_project
-            self.location = orig_location
+        # Get credentials (and the ADC-default project, if any)
+        credentials, adc_project = self._get_credentials()
+
+        effective_project = project or self.project or adc_project
+        effective_location = location or self.location
+
+        # Build request
+        system_instruction, contents = self._convert_messages_to_gemini_format(messages)
+        generation_config = self._build_generation_config(
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            stop=stop,
+        )
+
+        request_body = {"contents": contents}
+        if system_instruction:
+            request_body["systemInstruction"] = system_instruction
+        if generation_config:
+            request_body["generationConfig"] = generation_config
+
+        # Build URL
+        url = self._get_api_url(model, effective_project, effective_location, stream=stream)
+        if stream:
+            url += "?alt=sse"
+
+        # Make request
+        headers = {
+            "Authorization": f"Bearer {credentials.token}",
+            "Content-Type": "application/json",
+        }
+
+        client = await self._get_http_client()
+
+        verbose_proxy_logger.debug(f"Vertex AI request URL: {url}")
+        verbose_proxy_logger.debug(f"Vertex AI request body: {json.dumps(request_body)[:500]}...")
+
+        if stream:
+            return self._stream_response(client, url, headers, request_body, model)
+        else:
+            response = await client.post(url, headers=headers, json=request_body)
+            if response.status_code != 200:
+                error_text = response.text
+                verbose_proxy_logger.error(f"Vertex AI error response: {error_text}")
+            response.raise_for_status()
+            gemini_response = response.json()
+            return self._convert_gemini_response_to_openai(gemini_response, model)
     
     async def _stream_response(
         self,

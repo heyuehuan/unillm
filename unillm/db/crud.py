@@ -1,16 +1,23 @@
-import base64
 import hashlib
-import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from unillm.config import get_fernet_key
 from unillm.db.models import APIKey, AuditLog, ModelPricing, Project, RequestLog, SSHKey, User, UserProjectAccess
 from unillm.types import SSHKeyInfo
+
+
+def _utcnow() -> datetime:
+    """
+    Naive UTC now. Replaces the deprecated datetime.utcnow() while staying naive to
+    match the (naive) DateTime columns and their datetime.utcnow model defaults.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
@@ -22,10 +29,7 @@ def _hash_key(key: str) -> str:
 
 
 def _fernet() -> Fernet:
-    # Derive a 32-byte Fernet key from the JWT secret so no extra env var is needed.
-    secret = os.getenv("UNILLM_JWT_SECRET", "change-me-in-production").encode()
-    raw = hashlib.sha256(secret).digest()
-    return Fernet(base64.urlsafe_b64encode(raw))
+    return Fernet(get_fernet_key())
 
 
 def encrypt_api_key(plaintext: str) -> str:
@@ -53,7 +57,7 @@ def get_api_key_by_value(db: Session, raw_key: str) -> Optional[APIKey]:
 
 
 def touch_api_key(db: Session, api_key: APIKey) -> None:
-    api_key.last_used_at = datetime.utcnow()
+    api_key.last_used_at = _utcnow()
     db.commit()
 
 
@@ -156,7 +160,7 @@ def delete_ssh_key(db: Session, key_id: int, user_id: int) -> bool:
 
 
 def touch_ssh_key(db: Session, key_id: int) -> None:
-    db.query(SSHKey).filter(SSHKey.id == key_id).update({"last_used_at": datetime.utcnow()})
+    db.query(SSHKey).filter(SSHKey.id == key_id).update({"last_used_at": _utcnow()})
     db.commit()
 
 
@@ -166,7 +170,7 @@ def touch_ssh_key_by_name(db: Session, key_name: str, username: str) -> None:
     if not user:
         return
     db.query(SSHKey).filter(SSHKey.user_id == user.id, SSHKey.key_name == key_name).update(
-        {"last_used_at": datetime.utcnow()}
+        {"last_used_at": _utcnow()}
     )
     db.commit()
 
@@ -190,6 +194,14 @@ def get_user_by_id_any(db: Session, user_id: int) -> Optional[User]:
 
 def list_users(db: Session) -> List[User]:
     return db.query(User).all()
+
+
+def count_active_admins(db: Session, exclude_user_id: Optional[int] = None) -> int:
+    """Number of active admins, optionally excluding one user (to test a would-be change)."""
+    q = db.query(func.count(User.id)).filter(User.global_role == "admin", User.active == True)
+    if exclude_user_id is not None:
+        q = q.filter(User.id != exclude_user_id)
+    return q.scalar() or 0
 
 
 def get_project_owner(db: Session, project_id: int) -> Optional[User]:
@@ -625,7 +637,7 @@ def upsert_model_pricing(
         existing.output_per_1m = output_per_1m
         existing.currency = currency
         existing.notes = notes
-        existing.updated_at = datetime.utcnow()
+        existing.updated_at = _utcnow()
     else:
         existing = ModelPricing(
             model_name=model_name,
@@ -727,15 +739,20 @@ def compute_cost(db: Session, model_name: str, prompt_tokens: int, completion_to
 
 def seed_admin_if_needed(db: Session) -> Optional[str]:
     """
-    Ensure the admin user matches UNILLM_ADMIN_USERNAME / UNILLM_ADMIN_PASSWORD.
+    Bootstrap the first admin from UNILLM_ADMIN_USERNAME / UNILLM_ADMIN_PASSWORD.
 
     - If the user doesn't exist yet: creates it with a personal project and API key.
-    - If the user already exists: syncs the password from the env var so the env
-      vars remain the authoritative credential source across restarts.
+    - If the user already exists: left untouched by default. Overwriting an existing
+      account's password/role/active-flag on every restart is dangerous (a mistyped
+      env var silently re-enables and escalates whatever account it names), so that
+      behavior is opt-in via UNILLM_ADMIN_SYNC=true.
+
     Returns the plaintext API key only when a new user is created.
     """
-    username = os.getenv("UNILLM_ADMIN_USERNAME", "").strip()
-    password = os.getenv("UNILLM_ADMIN_PASSWORD", "").strip()
+    import os as _os
+
+    username = _os.getenv("UNILLM_ADMIN_USERNAME", "").strip()
+    password = _os.getenv("UNILLM_ADMIN_PASSWORD", "").strip()
     if not username or not password:
         return None
 
@@ -743,10 +760,12 @@ def seed_admin_if_needed(db: Session) -> Optional[str]:
 
     existing = db.query(User).filter(User.username == username).first()
     if existing:
-        existing.hashed_password = hash_password(password)
-        existing.global_role = "admin"
-        existing.active = True
-        db.commit()
+        if _os.getenv("UNILLM_ADMIN_SYNC", "").lower() == "true":
+            existing.hashed_password = hash_password(password)
+            existing.global_role = "admin"
+            existing.active = True
+            existing.token_version = (existing.token_version or 0) + 1
+            db.commit()
         return None
 
     _, plaintext_key = create_user(

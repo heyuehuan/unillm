@@ -12,6 +12,17 @@ Configuration via environment variables:
   UNILLM_SSH_KEYS="key_name1:public_key_value1:username1,key_name2:public_key_value2:username2"
 
 Or via .env file with the same format.
+
+SECURITY LIMITATIONS (by design — read before relying on this for authorization):
+  * No freshness. The signature is over the *static* API key, so a signed key
+    ("sk-...||name||sig") is itself a reusable bearer credential: anyone who captures
+    it once can replay it indefinitely. SSH mode adds attribution, not protection
+    against credential theft. A nonce/timestamp challenge would be required for that.
+  * Attribution only. A valid signature identifies which registered key signed the
+    request; it is not cross-checked against ownership of the API key's project. Treat
+    ssh_username as "who signed this", not "who is authorized".
+Use SSH mode as defense-in-depth / attribution, not as a substitute for protecting the
+API key itself.
 """
 
 import base64

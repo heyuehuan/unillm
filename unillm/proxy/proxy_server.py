@@ -12,6 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+import httpx
 import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,10 +23,10 @@ from sqlalchemy.orm import Session
 from unillm import __version__
 from unillm._logging import verbose_proxy_logger, set_verbose
 from unillm.db import get_db
-from unillm.db.database import init_db
+from unillm.db.database import init_db, SessionLocal
 from unillm.db import crud
 from unillm.proxy.auth import user_api_key_auth, set_general_settings, enforce_model_access
-from unillm.proxy.api_routes import router as api_router
+from unillm.proxy.api_routes import router as api_router, _client_ip
 from unillm.types import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -147,10 +148,12 @@ async def lifespan(app: FastAPI):
     try:
         api_key = crud.seed_admin_if_needed(db)
         if api_key:
-            verbose_proxy_logger.warning(
-                f"Admin user '{os.getenv('UNILLM_ADMIN_USERNAME')}' created. "
-                f"API key (shown once): {api_key}"
-            )
+            # Print once to stdout with a banner — deliberately NOT sent through the
+            # logger, to keep the secret out of log files/aggregators.
+            print("=" * 60)
+            print(f"  Admin user '{os.getenv('UNILLM_ADMIN_USERNAME')}' created.")
+            print(f"  API key (shown once, store it now): {api_key}")
+            print("=" * 60)
     finally:
         db.close()
 
@@ -179,11 +182,15 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# Add CORS middleware
+# Add CORS middleware. Default to same-origin only; set UNILLM_CORS_ORIGINS to a
+# comma-separated allowlist (e.g. "https://app.example.com") to permit cross-origin use.
+# Bearer-token auth does not need credentialed CORS, so credentials stay off unless an
+# explicit origin allowlist is configured.
+_cors_origins = [o.strip() for o in os.getenv("UNILLM_CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -227,16 +234,20 @@ async def list_models(
     
     Returns a list of models configured in the proxy.
     """
+    allowed = user_api_key_dict.allowed_models
     models = []
     for model_config in model_list:
         model_name = model_config.get("model_name", "")
+        # None or ["all"] = unrestricted; otherwise only surface permitted models.
+        if allowed is not None and "all" not in allowed and model_name not in allowed:
+            continue
         models.append(ModelInfo(
             id=model_name,
             object="model",
             created=int(time.time()),
             owned_by="vertex_ai",
         ))
-    
+
     return ModelListResponse(object="list", data=models)
 
 
@@ -265,52 +276,23 @@ async def get_model(
     )
 
 
-async def _read_request_body(request: Request) -> Dict[str, Any]:
-    """Read and parse the request body"""
-    body = await request.body()
-    try:
-        return json.loads(body) if body else {}
-    except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid JSON: {str(e)}",
-        )
-
-
 def _get_handler_for_model(model_name: str) -> VertexAIHandler:
-    """Get the appropriate handler for a model"""
+    """
+    Return the cached handler for a configured model.
+
+    Only models declared in model_list are served. Unknown model names are rejected
+    with a 404 rather than being forwarded to Vertex AI under the proxy's default
+    credentials (which also used to leak a per-request, never-closed HTTP client).
+    """
     if model_name in vertex_handlers:
         handler = vertex_handlers[model_name]
         verbose_proxy_logger.debug(f"Using cached handler for model '{model_name}': {type(handler).__name__}")
         return handler
-    
-    # Try to find a matching model configuration
-    model_config = proxy_config.get_model_config(model_name)
-    if model_config:
-        params = model_config.get("litellm_params", model_config.get("unillm_params", {}))
-        model_type = params.get("model_type", MODEL_TYPE_VERTEX_AI)
-        verbose_proxy_logger.debug(f"Model '{model_name}' has model_type: {model_type}")
-        
-        # Route to appropriate handler based on model_type
-        if model_type == MODEL_TYPE_VERTEX_AI_KMS:
-            return VertexAIKMSHandler(
-                project=params.get("project"),
-                location=params.get("location", "us-central1"),
-                kms_key_name=params.get("kms_key_name"),
-            )
-        elif model_type == MODEL_TYPE_VLLM:
-            return VLLMHandler(
-                base_url=params.get("base_url", "http://localhost:8000"),
-                api_key=params.get("api_key"),
-            )
-        else:
-            return VertexAIHandler(
-                project=params.get("project"),
-                location=params.get("location", "us-central1"),
-            )
-    
-    # Return default handler
-    return VertexAIHandler()
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Model '{model_name}' is not configured",
+    )
 
 
 def _get_actual_model_name(model_name: str) -> str:
@@ -339,27 +321,105 @@ def _get_model_type(model_name: str) -> str:
     return params.get("model_type", MODEL_TYPE_VERTEX_AI)
 
 
-def _compute_cost(db, model_name: str, prompt_tokens: int, completion_tokens: int) -> Optional[float]:
-    """Compute cost in USD from DB pricing table, or None if model has no pricing configured."""
-    return crud.compute_cost(db, model_name, prompt_tokens, completion_tokens)
+def _base_log_fields(request_id, auth, ip_address, backend_model, model_type, stream, labels=None) -> Dict[str, Any]:
+    """Assemble the per-request log fields shared by streaming and non-streaming paths."""
+    return {
+        "request_id": request_id,
+        # API-key auth is project-scoped; there is no individual user to attribute, so
+        # leave user_id null rather than misfiling the project id here.
+        "user_id": None,
+        "project_id": auth.project_id,
+        "api_key_name": auth.api_key_name,
+        "api_key_prefix": auth.api_key[:8] if auth.api_key else None,
+        "ssh_username": auth.ssh_username,
+        "ip_address": ip_address,
+        "backend_model": backend_model,
+        "model_type": model_type,
+        "stream": stream,
+        "labels": labels,
+    }
 
 
-async def _rewrite_model_in_stream(stream, model_alias: str):
-    """Rewrite the model field in each SSE chunk to use the configured alias."""
-    async for chunk in stream:
-        if chunk.startswith("data: "):
-            data = chunk[6:].strip()
-            if data == "[DONE]":
+def _upstream_status(exc: Exception) -> int:
+    """HTTP status to record for an upstream failure."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code
+    return 500
+
+
+def _sanitized_http_exception(exc: Exception) -> HTTPException:
+    """Map an upstream/handler exception to a client-safe HTTPException without leaking internals."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if 400 <= code < 500:
+            return HTTPException(status_code=code, detail="Upstream model provider rejected the request")
+        return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Upstream model provider error")
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+        return HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Upstream model provider unavailable")
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
+
+
+def _write_request_log(model: str, prompt_tokens: int, completion_tokens: int, **fields) -> None:
+    """
+    Persist a request log on a fresh DB session.
+
+    Background tasks (and streaming finalizers) run after the request's own session is
+    closed, so we must not reuse it. Cost is computed here from the pricing table.
+    """
+    db = SessionLocal()
+    try:
+        cost = crud.compute_cost(db, model, prompt_tokens, completion_tokens)
+        crud.create_request_log(
+            db=db, model=model,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            cost_usd=cost, **fields,
+        )
+    except Exception as e:  # never let logging break the response
+        verbose_proxy_logger.warning(f"Failed to write request log: {e}")
+    finally:
+        db.close()
+
+
+async def _stream_with_logging(stream, model_alias: str, log_fields: Dict[str, Any], start_time: float):
+    """
+    Wrap an SSE stream: rewrite the model alias, capture the final usage numbers, and
+    write exactly one request log when the stream ends (success or error). This is what
+    makes streaming requests metered — previously they were logged as 200/0-tokens up front.
+    """
+    prompt_tokens = 0
+    completion_tokens = 0
+    status_code = 200
+    error_message: Optional[str] = None
+    try:
+        async for chunk in stream:
+            if chunk.startswith("data: "):
+                data = chunk[6:].strip()
+                if data == "[DONE]":
+                    yield chunk
+                    continue
+                try:
+                    parsed = json.loads(data)
+                    parsed["model"] = model_alias
+                    usage = parsed.get("usage")
+                    if usage:
+                        prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                        completion_tokens = usage.get("completion_tokens", completion_tokens)
+                    yield f"data: {json.dumps(parsed)}\n\n"
+                except json.JSONDecodeError:
+                    yield chunk
+            else:
                 yield chunk
-                continue
-            try:
-                parsed = json.loads(data)
-                parsed["model"] = model_alias
-                yield f"data: {json.dumps(parsed)}\n\n"
-            except json.JSONDecodeError:
-                yield chunk
-        else:
-            yield chunk
+    except Exception as e:
+        status_code = 500
+        error_message = str(e)
+        raise
+    finally:
+        _write_request_log(
+            model=model_alias, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            status_code=status_code, error_message=error_message,
+            latency_ms=int((time.time() - start_time) * 1000),
+            **log_fields,
+        )
 
 
 # Chat completions endpoint
@@ -380,7 +440,7 @@ async def chat_completions(
     """
     start_time = time.time()
     request_id = str(uuid.uuid4())
-    ip_address = request.client.host if request.client else None
+    ip_address = _client_ip(request)
 
     model = request_body.model
     labels = request_body.labels
@@ -400,23 +460,16 @@ async def chat_completions(
 
     verbose_proxy_logger.debug(f"Chat completion request_id={request_id} model={model} -> {actual_model}")
 
+    log_fields = _base_log_fields(request_id, user_api_key_dict, ip_address,
+                                  actual_model, model_type, stream, labels)
+
     def _log(status_code: int, prompt_tokens: int = 0, completion_tokens: int = 0, error_message: Optional[str] = None):
-        latency_ms = int((time.time() - start_time) * 1000)
         background_tasks.add_task(
-            crud.create_request_log,
-            db=db, request_id=request_id,
-            user_id=user_api_key_dict.project_id,  # project_id doubles as user scope for env keys
-            project_id=user_api_key_dict.project_id,
-            api_key_name=user_api_key_dict.api_key_name,
-            api_key_prefix=user_api_key_dict.api_key[:8] if user_api_key_dict.api_key else None,
-            ssh_username=user_api_key_dict.ssh_username,
-            ip_address=ip_address,
-            model=model, backend_model=actual_model, model_type=model_type,
-            stream=stream, labels=labels,
+            _write_request_log,
+            model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             status_code=status_code, error_message=error_message,
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            cost_usd=_compute_cost(db, model, prompt_tokens, completion_tokens),
-            latency_ms=latency_ms,
+            latency_ms=int((time.time() - start_time) * 1000),
+            **log_fields,
         )
 
     try:
@@ -437,9 +490,9 @@ async def chat_completions(
         response = await handler.chat_completion(**handler_kwargs)
 
         if stream:
-            _log(status_code=200)
+            # The stream wrapper writes the log itself once usage is known.
             return StreamingResponse(
-                _rewrite_model_in_stream(response, model),
+                _stream_with_logging(response, model, log_fields, start_time),
                 media_type="text/event-stream",
             )
 
@@ -459,9 +512,9 @@ async def chat_completions(
     except HTTPException:
         raise
     except Exception as e:
-        _log(status_code=500, error_message=str(e))
+        _log(status_code=_upstream_status(e), error_message=str(e))
         verbose_proxy_logger.exception(f"Error in chat completion request_id={request_id}: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise _sanitized_http_exception(e)
 
 
 # Text completions endpoint
@@ -482,7 +535,7 @@ async def completions(
     """
     start_time = time.time()
     request_id = str(uuid.uuid4())
-    ip_address = request.client.host if request.client else None
+    ip_address = _client_ip(request)
 
     model = request_body.model
     prompt = request_body.prompt
@@ -501,22 +554,16 @@ async def completions(
 
     verbose_proxy_logger.debug(f"Text completion request_id={request_id} model={model} -> {actual_model}")
 
+    log_fields = _base_log_fields(request_id, user_api_key_dict, ip_address,
+                                  actual_model, model_type, stream, labels=None)
+
     def _log(status_code: int, prompt_tokens: int = 0, completion_tokens: int = 0, error_message: Optional[str] = None):
-        latency_ms = int((time.time() - start_time) * 1000)
         background_tasks.add_task(
-            crud.create_request_log,
-            db=db, request_id=request_id,
-            project_id=user_api_key_dict.project_id,
-            api_key_name=user_api_key_dict.api_key_name,
-            api_key_prefix=user_api_key_dict.api_key[:8] if user_api_key_dict.api_key else None,
-            ssh_username=user_api_key_dict.ssh_username,
-            ip_address=ip_address,
-            model=model, backend_model=actual_model, model_type=model_type,
-            stream=stream,
+            _write_request_log,
+            model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             status_code=status_code, error_message=error_message,
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            cost_usd=_compute_cost(db, model, prompt_tokens, completion_tokens),
-            latency_ms=latency_ms,
+            latency_ms=int((time.time() - start_time) * 1000),
+            **log_fields,
         )
 
     try:
@@ -537,9 +584,8 @@ async def completions(
         response = await handler.text_completion(**handler_kwargs)
 
         if stream:
-            _log(status_code=200)
             return StreamingResponse(
-                _rewrite_model_in_stream(response, model),
+                _stream_with_logging(response, model, log_fields, start_time),
                 media_type="text/event-stream",
             )
 
@@ -559,13 +605,17 @@ async def completions(
     except HTTPException:
         raise
     except Exception as e:
-        _log(status_code=500, error_message=str(e))
+        _log(status_code=_upstream_status(e), error_message=str(e))
         verbose_proxy_logger.exception(f"Error in text completion request_id={request_id}: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise _sanitized_http_exception(e)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa_fallback(full_path: str):
+    # Don't serve the SPA shell for unmatched API/docs routes — return a real 404 so
+    # clients and monitoring see the correct status instead of a 200 + HTML page.
+    if full_path.startswith(("api/", "v1/", "models", "docs", "redoc", "openapi.json", "health")):
+        raise HTTPException(status_code=404, detail="Not found")
     if os.path.isfile(_STATIC_INDEX):
         return FileResponse(_STATIC_INDEX)
     raise HTTPException(status_code=404, detail="Not found")

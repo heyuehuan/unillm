@@ -5,27 +5,33 @@ Endpoints for user, project, API key, and SSH key management.
 All management endpoints require JWT authentication via POST /api/auth/login.
 """
 
-import os
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Literal, Optional
 
 import bcrypt as _bcrypt
+import jwt
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from unillm.config import get_jwt_secret
 from unillm.db import get_db
 from unillm.db import crud
 from unillm.db.models import APIKey, Project, User
 
 router = APIRouter(prefix="/api", tags=["management"])
 
-# JWT configuration — set UNILLM_JWT_SECRET in production
-_JWT_SECRET = os.getenv("UNILLM_JWT_SECRET", "change-me-in-production")
+# JWT configuration — the signing secret is resolved (and validated) in unillm.config.
 _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRE_HOURS = 24
+
+# Precomputed bcrypt hash of a random string, used to keep login timing constant when
+# the username does not exist (mitigates username enumeration via response timing).
+_DUMMY_PASSWORD_HASH = _bcrypt.hashpw(b"unillm-timing-equalizer", _bcrypt.gensalt()).decode()
+
+GlobalRole = Literal["user", "admin", "viewer"]
+ProjectRole = Literal["viewer", "developer", "admin"]
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -55,12 +61,16 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
+_USERNAME_PATTERN = r"^[a-zA-Z0-9_.-]{2,32}$"
+_MIN_PASSWORD_LEN = 8
+
+
 class CreateUserRequest(BaseModel):
-    username: str
+    username: str = Field(..., pattern=_USERNAME_PATTERN)
     name: Optional[str] = None
-    password: str
+    password: str = Field(..., min_length=_MIN_PASSWORD_LEN, max_length=72)
     email: Optional[str] = None
-    global_role: str = "user"
+    global_role: GlobalRole = "user"
 
 
 class CreateUserResponse(BaseModel):
@@ -182,21 +192,41 @@ class UpsertModelPricingRequest(BaseModel):
 # Auth helpers
 # ---------------------------------------------------------------------------
 
+def _client_ip(request: Request) -> Optional[str]:
+    """
+    Resolve the client IP. Behind a reverse proxy request.client.host is the proxy,
+    so honor X-Forwarded-For only when explicitly opted in (UNILLM_TRUST_PROXY_HEADERS=true),
+    taking the first (client) hop. XFF is trivially spoofable when not fronted by a
+    trusted proxy, hence the opt-in.
+    """
+    import os
+    if os.getenv("UNILLM_TRUST_PROXY_HEADERS", "").lower() == "true":
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
 def hash_password(password: str) -> str:
     return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
 
 
 def _verify_password(plain: str, hashed: str) -> bool:
-    return _bcrypt.checkpw(plain.encode(), hashed.encode())
+    try:
+        return _bcrypt.checkpw(plain.encode(), hashed.encode())
+    except (ValueError, TypeError):
+        # Malformed/legacy hash in the DB — treat as a failed check, never a 500.
+        return False
 
 
-def _create_token(user_id: int, role: str) -> str:
+def _create_token(user: User) -> str:
     payload = {
-        "sub": str(user_id),
-        "role": role,
-        "exp": datetime.utcnow() + timedelta(hours=_JWT_EXPIRE_HOURS),
+        "sub": str(user.id),
+        "role": user.global_role,
+        "tv": user.token_version or 0,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=_JWT_EXPIRE_HOURS),
     }
-    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+    return jwt.encode(payload, get_jwt_secret(), algorithm=_JWT_ALGORITHM)
 
 
 def get_current_user(
@@ -206,13 +236,16 @@ def get_current_user(
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     try:
-        payload = jwt.decode(credentials.credentials, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        payload = jwt.decode(credentials.credentials, get_jwt_secret(), algorithms=[_JWT_ALGORITHM])
         user_id = int(payload["sub"])
-    except (JWTError, KeyError, ValueError):
+    except (jwt.PyJWTError, KeyError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     user = crud.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    # A password change/reset bumps token_version, invalidating older tokens.
+    if int(payload.get("tv", 0)) != (user.token_version or 0):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has been invalidated")
     return user
 
 
@@ -241,6 +274,16 @@ def _user_response(u) -> UserResponse:
                         created_at=u.created_at)
 
 
+def _write_audit_log(**kwargs):
+    """Run an audit write on its own session (background tasks outlive the request session)."""
+    from unillm.db.database import SessionLocal
+    db = SessionLocal()
+    try:
+        crud.create_audit_log(db=db, **kwargs)
+    finally:
+        db.close()
+
+
 def _audit(
     background_tasks: BackgroundTasks,
     db: Session,
@@ -252,12 +295,11 @@ def _audit(
     resource_id: Optional[str] = None,
     detail: Optional[Dict[str, Any]] = None,
 ):
-    """Schedule an audit log write as a background task."""
-    ip = request.client.host if request.client else None
+    """Schedule an audit log write as a background task (on a fresh DB session)."""
+    ip = _client_ip(request)
     ua = request.headers.get("user-agent")
     background_tasks.add_task(
-        crud.create_audit_log,
-        db=db,
+        _write_audit_log,
         action=action,
         severity=severity,
         user_id=user.id if user else None,
@@ -277,7 +319,10 @@ def _audit(
 @router.post("/auth/login", response_model=TokenResponse)
 def login(req: LoginRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     user = crud.get_user_by_username(db, req.username)
-    if not user or not _verify_password(req.password, user.hashed_password):
+    # Always run a bcrypt verification (against a dummy hash when the user is unknown)
+    # so the response time does not reveal whether the username exists.
+    password_ok = _verify_password(req.password, user.hashed_password if user else _DUMMY_PASSWORD_HASH)
+    if not user or not password_ok:
         _audit(background_tasks, db, "login_failure", request, severity="warning",
                detail={"username": req.username})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
@@ -290,7 +335,7 @@ def login(req: LoginRequest, request: Request, background_tasks: BackgroundTasks
                detail={"username": req.username, "reason": "password_login_disabled"})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password login is disabled for this account")
     _audit(background_tasks, db, "login_success", request, user=user)
-    return TokenResponse(access_token=_create_token(user.id, user.global_role))
+    return TokenResponse(access_token=_create_token(user))
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +344,7 @@ def login(req: LoginRequest, request: Request, background_tasks: BackgroundTasks
 
 class UpdateMeRequest(BaseModel):
     current_password: str
-    new_password: str
+    new_password: str = Field(..., min_length=_MIN_PASSWORD_LEN, max_length=72)
 
 
 @router.get("/users/me", response_model=UserResponse)
@@ -310,14 +355,19 @@ def get_me(current_user: User = Depends(get_current_user)):
 @router.put("/users/me", response_model=UserResponse)
 def update_me(
     req: UpdateMeRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if not _verify_password(req.current_password, current_user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
     current_user.hashed_password = hash_password(req.new_password)
+    current_user.token_version = (current_user.token_version or 0) + 1
     db.commit()
     db.refresh(current_user)
+    _audit(background_tasks, db, "password_changed", request, user=current_user,
+           resource_type="user", resource_id=str(current_user.id))
     return _user_response(current_user)
 
 
@@ -347,8 +397,8 @@ def create_user(req: CreateUserRequest, request: Request, background_tasks: Back
 
 class AdminUpdateUserRequest(BaseModel):
     name: Optional[str] = None
-    global_role: Optional[str] = None
-    new_password: Optional[str] = None
+    global_role: Optional[GlobalRole] = None
+    new_password: Optional[str] = Field(None, min_length=_MIN_PASSWORD_LEN, max_length=72)
     password_login_disabled: Optional[bool] = None
     active: Optional[bool] = None
 
@@ -362,22 +412,36 @@ def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Reques
     target = crud.get_user_by_id_any(db, user_id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Guard against locking out the last admin by demotion or deactivation.
+    demoting = req.global_role is not None and req.global_role != "admin" and target.global_role == "admin"
+    deactivating = req.active is False and target.active
+    if (demoting or deactivating) and crud.count_active_admins(db, exclude_user_id=target.id) == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Cannot remove the last remaining active admin")
+
     changes = {}
+    invalidate_sessions = False
     if req.name is not None:
         target.name = req.name or None
         changes["name"] = req.name
     if req.global_role is not None:
         target.global_role = req.global_role
         changes["global_role"] = req.global_role
+        invalidate_sessions = True
     if req.new_password is not None:
         target.hashed_password = hash_password(req.new_password)
         changes["password_reset"] = True
+        invalidate_sessions = True
     if req.password_login_disabled is not None:
         target.password_login_disabled = req.password_login_disabled
         changes["password_login_disabled"] = req.password_login_disabled
     if req.active is not None:
         target.active = req.active
         changes["active"] = req.active
+        invalidate_sessions = True
+    if invalidate_sessions:
+        target.token_version = (target.token_version or 0) + 1
     db.commit()
     db.refresh(target)
     _audit(background_tasks, db, "user_updated", request, user=admin,
@@ -433,11 +497,11 @@ class ProjectMemberResponse(BaseModel):
 
 class AddMemberRequest(BaseModel):
     user_id: int
-    role: str = "viewer"
+    role: ProjectRole = "viewer"
 
 
 class UpdateMemberRoleRequest(BaseModel):
-    role: str
+    role: ProjectRole
 
 
 def _member_response(access, user) -> ProjectMemberResponse:
@@ -468,6 +532,8 @@ def list_members(
 def add_member(
     project_id: int,
     req: AddMemberRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -479,6 +545,9 @@ def add_member(
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     access = crud.add_user_to_project(db, user_id=req.user_id, project_id=project_id, role=req.role)
+    _audit(background_tasks, db, "project_member_added", request, user=current_user,
+           resource_type="project", resource_id=str(project_id),
+           detail={"user_id": req.user_id, "role": req.role})
     return _member_response(access, target)
 
 
@@ -487,6 +556,8 @@ def update_member_role(
     project_id: int,
     user_id: int,
     req: UpdateMemberRoleRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -495,6 +566,9 @@ def update_member_role(
     if not access:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
     target = crud.get_user_by_id(db, user_id)
+    _audit(background_tasks, db, "project_member_role_updated", request, user=current_user,
+           resource_type="project", resource_id=str(project_id),
+           detail={"user_id": user_id, "role": req.role})
     return _member_response(access, target)
 
 
@@ -502,12 +576,17 @@ def update_member_role(
 def remove_member(
     project_id: int,
     user_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     _require_project_admin(db, current_user, project_id)
     if not crud.remove_project_member(db, project_id=project_id, user_id=user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    _audit(background_tasks, db, "project_member_removed", request, user=current_user,
+           resource_type="project", resource_id=str(project_id),
+           detail={"user_id": user_id})
 
 
 # ---------------------------------------------------------------------------
@@ -552,17 +631,24 @@ def create_api_key(
 @router.get("/keys/{key_id}/reveal")
 def reveal_api_key(
     key_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     key = db.query(APIKey).filter(APIKey.id == key_id).first()
     if not key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key not found")
+    # Revealing plaintext is the most sensitive read in the system: restrict to
+    # project admins (or global admins), and always record it in the audit trail.
     role = crud.get_user_project_role(db, current_user.id, key.project_id)
-    if role not in ("admin", "developer") and current_user.global_role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Developer or admin access required")
+    if role != "admin" and current_user.global_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
     if not key.key_ciphertext:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plaintext not available for this key")
+    _audit(background_tasks, db, "api_key_revealed", request, severity="warning", user=current_user,
+           resource_type="api_key", resource_id=str(key_id),
+           detail={"name": key.name, "project_id": key.project_id})
     return {"api_key": crud.decrypt_api_key(key.key_ciphertext)}
 
 
@@ -757,8 +843,8 @@ def get_request_logs(
     status_code: Optional[int] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -796,8 +882,8 @@ def get_audit_logs(
     severity: Optional[str] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     _: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):

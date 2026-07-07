@@ -1,9 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from unillm.db.database import Base
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now (datetime.utcnow is deprecated in 3.12); columns are naive DateTime."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class User(Base):
@@ -18,7 +23,9 @@ class User(Base):
     personal_project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     password_login_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Bumped on password change/reset so previously-issued JWTs stop validating.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     ssh_keys: Mapped[List["SSHKey"]] = relationship("SSHKey", back_populates="user", cascade="all, delete-orphan")
     project_access: Mapped[List["UserProjectAccess"]] = relationship("UserProjectAccess", back_populates="user", cascade="all, delete-orphan")
@@ -31,7 +38,7 @@ class Project(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     api_keys: Mapped[List["APIKey"]] = relationship("APIKey", back_populates="project", cascade="all, delete-orphan")
     user_access: Mapped[List["UserProjectAccess"]] = relationship("UserProjectAccess", back_populates="project", cascade="all, delete-orphan")
@@ -61,7 +68,7 @@ class APIKey(Base):
     # ["all"] = unrestricted, [] = no access, ["model-a", "model-b"] = specific models
     allowed_models: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: ["all"])
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     project: Mapped["Project"] = relationship("Project", back_populates="api_keys")
@@ -69,12 +76,13 @@ class APIKey(Base):
 
 class SSHKey(Base):
     __tablename__ = "ssh_keys"
+    __table_args__ = (UniqueConstraint("user_id", "key_name"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     key_name: Mapped[str] = mapped_column(String, nullable=False)
     public_key: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="ssh_keys")
@@ -90,7 +98,7 @@ class ModelPricing(Base):
     output_per_1m: Mapped[float] = mapped_column(Float, nullable=False)  # USD per 1M output tokens
     currency: Mapped[str] = mapped_column(String, default="USD")
     notes: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class RequestLog(Base):
@@ -98,16 +106,16 @@ class RequestLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     request_id: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     # Who made the request (plain int ref — no FK so logs survive user deletion)
     user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     api_key_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     api_key_prefix: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     ssh_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # What was requested
-    model: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False, index=True)
     backend_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     model_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     stream: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -129,7 +137,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     # Who performed the action (plain int ref — no FK so audit trail survives user deletion)
     user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     username: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # denormalized

@@ -66,6 +66,18 @@ def get_fernet_key() -> bytes:
     return base64.urlsafe_b64encode(raw)
 
 
+def recoverable_keys_enabled() -> bool:
+    """
+    Whether newly created API keys store a Fernet-encrypted copy of the plaintext,
+    making them recoverable via the admin-only, audited /api/keys/{id}/reveal endpoint.
+
+    Controlled by UNILLM_RECOVERABLE_KEYS (default: true). Set to "false" (or
+    "0"/"no"/"off") for show-once-only keys: no ciphertext is stored and reveal
+    returns 404. Existing keys keep whatever was stored at creation time.
+    """
+    return os.getenv("UNILLM_RECOVERABLE_KEYS", "true").strip().lower() not in ("false", "0", "no", "off")
+
+
 def reset_caches() -> None:
     """Clear cached secrets (test helper)."""
     global _jwt_secret_cache

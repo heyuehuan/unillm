@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.scripts]
-unillm = "unillm.main:cli"
+unillm = "unillm.proxy.proxy_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["unillm"]

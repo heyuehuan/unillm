@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from unillm.config import get_fernet_key
+from unillm.config import get_fernet_key, recoverable_keys_enabled
 from unillm.db.models import APIKey, AuditLog, ModelPricing, Project, RequestLog, SSHKey, User, UserProjectAccess
 from unillm.types import SSHKeyInfo
 
@@ -42,6 +42,21 @@ def decrypt_api_key(ciphertext: str) -> str:
 
 def _generate_api_key() -> str:
     return "sk-" + secrets.token_urlsafe(36)
+
+
+def _maybe_encrypt_api_key(plaintext: str) -> Optional[str]:
+    """Ciphertext for later reveal, or None when recoverable keys are disabled."""
+    return encrypt_api_key(plaintext) if recoverable_keys_enabled() else None
+
+
+def _unique_project_name(db: Session, base_name: str) -> str:
+    """Project names are unique; suffix with -2, -3, ... on collision."""
+    name = base_name
+    counter = 2
+    while db.query(Project).filter(Project.name == name).first() is not None:
+        name = f"{base_name}-{counter}"
+        counter += 1
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +245,8 @@ def create_user(
         return user, None
 
     # Create personal project first
-    project = Project(name=f"{username}-personal", description=f"Personal project for {username}")
+    project = Project(name=_unique_project_name(db, f"{username}-personal"),
+                      description=f"Personal project for {username}")
     db.add(project)
     db.flush()  # get project.id without committing
 
@@ -257,7 +273,7 @@ def create_user(
         name="default",
         key_hash=_hash_key(plaintext_key),
         key_prefix=plaintext_key[:8],
-        key_ciphertext=encrypt_api_key(plaintext_key),
+        key_ciphertext=_maybe_encrypt_api_key(plaintext_key),
         allowed_models=["all"],
     )
     db.add(api_key)
@@ -281,6 +297,10 @@ def deactivate_user(db: Session, user_id: int) -> bool:
 
 def get_project_by_id(db: Session, project_id: int) -> Optional[Project]:
     return db.query(Project).filter(Project.id == project_id).first()
+
+
+def get_project_by_name(db: Session, name: str) -> Optional[Project]:
+    return db.query(Project).filter(Project.name == name).first()
 
 
 def get_projects_for_user(db: Session, user_id: int, is_admin: bool = False) -> List[Project]:
@@ -380,7 +400,7 @@ def create_api_key(
         name=name,
         key_hash=_hash_key(plaintext_key),
         key_prefix=plaintext_key[:8],
-        key_ciphertext=encrypt_api_key(plaintext_key),
+        key_ciphertext=_maybe_encrypt_api_key(plaintext_key),
         allowed_models=allowed_models,
     )
     db.add(api_key)

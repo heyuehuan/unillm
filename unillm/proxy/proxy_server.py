@@ -18,14 +18,17 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, s
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session
-
 from unillm import __version__
 from unillm._logging import verbose_proxy_logger, set_verbose
 from unillm.db import get_db
 from unillm.db.database import init_db, SessionLocal
 from unillm.db import crud
-from unillm.proxy.auth import user_api_key_auth, set_general_settings, enforce_model_access
+from unillm.proxy.auth import (
+    user_api_key_auth,
+    set_general_settings,
+    enforce_model_access,
+    _check_model_access,
+)
 from unillm.proxy.api_routes import router as api_router, _client_ip
 from unillm.types import (
     ChatCompletionRequest,
@@ -239,7 +242,7 @@ async def list_models(
     for model_config in model_list:
         model_name = model_config.get("model_name", "")
         # None or ["all"] = unrestricted; otherwise only surface permitted models.
-        if allowed is not None and "all" not in allowed and model_name not in allowed:
+        if not _check_model_access(allowed, model_name):
             continue
         models.append(ModelInfo(
             id=model_name,
@@ -260,9 +263,10 @@ async def get_model(
     """
     Get information about a specific model.
     """
-    # Check if model exists
+    # Check if model exists — and hide models the key has no access to (404, not 403,
+    # so restricted keys can't enumerate the configured model list).
     model_config = proxy_config.get_model_config(model_id)
-    if model_config is None:
+    if model_config is None or not _check_model_access(user_api_key_dict.allowed_models, model_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Model '{model_id}' not found",
@@ -430,7 +434,6 @@ async def chat_completions(
     request_body: ChatCompletionRequest,
     background_tasks: BackgroundTasks,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
-    db: Session = Depends(get_db),
 ):
     """
     Create a chat completion.
@@ -525,7 +528,6 @@ async def completions(
     request_body: CompletionRequest,
     background_tasks: BackgroundTasks,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
-    db: Session = Depends(get_db),
 ):
     """
     Create a text completion.

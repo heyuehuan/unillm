@@ -55,3 +55,6 @@ unillm/static/
 
 # Reference (vendored upstream copy, not part of this project)
 litellm/*
+
+# Internal working documents
+docs-dev/

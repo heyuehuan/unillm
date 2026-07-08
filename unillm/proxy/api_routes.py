@@ -477,6 +477,8 @@ def get_project(
 @router.post("/projects", response_model=ProjectResponse, status_code=201)
 def create_project(req: CreateProjectRequest, request: Request, background_tasks: BackgroundTasks,
                    admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    if crud.get_project_by_name(db, req.name):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
     project = crud.create_project(db, name=req.name, description=req.description, creator_id=admin.id)
     _audit(background_tasks, db, "project_created", request, user=admin,
            resource_type="project", resource_id=str(project.id),
@@ -646,10 +648,19 @@ def reveal_api_key(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
     if not key.key_ciphertext:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plaintext not available for this key")
+    try:
+        plaintext = crud.decrypt_api_key(key.key_ciphertext)
+    except Exception:
+        # Encryption key changed since this key was created (e.g. rotated
+        # UNILLM_ENCRYPTION_KEY or an ephemeral JWT secret) — unrecoverable.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Key cannot be decrypted (encryption key has changed). Revoke it and create a new one.",
+        )
     _audit(background_tasks, db, "api_key_revealed", request, severity="warning", user=current_user,
            resource_type="api_key", resource_id=str(key_id),
            detail={"name": key.name, "project_id": key.project_id})
-    return {"api_key": crud.decrypt_api_key(key.key_ciphertext)}
+    return {"api_key": plaintext}
 
 
 @router.delete("/keys/{key_id}", status_code=204)

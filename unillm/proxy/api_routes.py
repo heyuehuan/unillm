@@ -846,6 +846,19 @@ def list_models(current_user: User = Depends(get_current_user), db: Session = De
 # Logs
 # ---------------------------------------------------------------------------
 
+def _naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Normalize a query-param datetime to naive UTC.
+
+    DB timestamps are stored naive-UTC; clients send tz-aware values ('...Z').
+    Comparing aware against naive only "works" on SQLite by string accident and
+    breaks on other backends, so convert before filtering.
+    """
+    if dt is None or dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _resolve_project_filter(db, current_user, requested_ids: List[int]) -> Optional[List[int]]:
     """Return the effective project id list to filter by, or None (admin, no filter)."""
     if current_user.global_role == "admin":
@@ -875,7 +888,8 @@ def get_request_logs(
         db, allowed_project_ids=filter_ids,
         ssh_username=ssh_username,
         model=model, status_code=status_code,
-        from_date=from_date, to_date=to_date, limit=limit, offset=offset,
+        from_date=_naive_utc(from_date), to_date=_naive_utc(to_date),
+        limit=limit, offset=offset,
     )
     pids = {r.project_id for r in rows if r.project_id is not None}
     project_names: dict[int, str] = {}
@@ -910,7 +924,8 @@ def get_audit_logs(
 ):
     rows, total = crud.query_audit_logs(
         db, action=action, user_id=user_id, severity=severity,
-        from_date=from_date, to_date=to_date, limit=limit, offset=offset,
+        from_date=_naive_utc(from_date), to_date=_naive_utc(to_date),
+        limit=limit, offset=offset,
     )
     items = [AuditLogResponse(
         id=r.id, created_at=r.created_at, user_id=r.user_id, username=r.username,
@@ -931,4 +946,5 @@ def get_stats(
     db: Session = Depends(get_db),
 ):
     filter_ids = _resolve_project_filter(db, current_user, project_ids)
-    return crud.get_request_stats(db, from_date=from_date, to_date=to_date, allowed_project_ids=filter_ids, ssh_username=ssh_username)
+    return crud.get_request_stats(db, from_date=_naive_utc(from_date), to_date=_naive_utc(to_date),
+                                  allowed_project_ids=filter_ids, ssh_username=ssh_username)

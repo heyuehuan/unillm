@@ -136,6 +136,17 @@ def test_bad_username_rejected(client, admin_token):
     assert r.status_code == 422
 
 
+def test_no_orphan_rows_for_missing_project(client, admin_token):
+    # Global admins bypass the role check, so these endpoints must verify the
+    # project actually exists instead of inserting orphaned rows.
+    r = client.post("/api/projects/99999/keys", json={"name": "orphan-key"},
+                    headers=_auth(admin_token))
+    assert r.status_code == 404
+    r = client.post("/api/projects/99999/members", json={"user_id": 1, "role": "viewer"},
+                    headers=_auth(admin_token))
+    assert r.status_code == 404
+
+
 def test_dev_mode_disabled_when_db_in_use(client, admin_token, monkeypatch):
     # Even with UNILLM_DEV_MODE=true and no DATABASE_URL env var, a database that
     # contains real users/keys must not allow-all an invalid API key.

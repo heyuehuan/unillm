@@ -543,6 +543,8 @@ def add_member(
     db: Session = Depends(get_db),
 ):
     _require_project_admin(db, current_user, project_id)
+    if not crud.get_project_by_id(db, project_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     existing = crud.get_user_project_role(db, req.user_id, project_id)
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already a member")
@@ -624,6 +626,8 @@ def create_api_key(
     role = crud.get_user_project_role(db, current_user.id, project_id)
     if role != "admin" and current_user.global_role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
+    if not crud.get_project_by_id(db, project_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     key_obj, plaintext_key = crud.create_api_key(
         db, project_id=project_id, name=req.name, allowed_models=req.allowed_models,
     )

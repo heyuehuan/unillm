@@ -420,12 +420,15 @@ def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Reques
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="Cannot remove the last remaining active admin")
 
+    # A present-but-unchanged field is not a change: clients (the admin UI included)
+    # send the full form, and only real changes may invalidate the target's sessions
+    # or appear in the audit detail.
     changes = {}
     invalidate_sessions = False
-    if req.name is not None:
+    if req.name is not None and (req.name or None) != target.name:
         target.name = req.name or None
         changes["name"] = req.name
-    if req.global_role is not None:
+    if req.global_role is not None and req.global_role != target.global_role:
         target.global_role = req.global_role
         changes["global_role"] = req.global_role
         invalidate_sessions = True
@@ -433,10 +436,10 @@ def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Reques
         target.hashed_password = hash_password(req.new_password)
         changes["password_reset"] = True
         invalidate_sessions = True
-    if req.password_login_disabled is not None:
+    if req.password_login_disabled is not None and req.password_login_disabled != target.password_login_disabled:
         target.password_login_disabled = req.password_login_disabled
         changes["password_login_disabled"] = req.password_login_disabled
-    if req.active is not None:
+    if req.active is not None and req.active != target.active:
         target.active = req.active
         changes["active"] = req.active
         invalidate_sessions = True

@@ -74,6 +74,30 @@ def test_password_change_invalidates_token(client, admin_token):
     assert client.get("/api/users/me", headers=_auth(token)).status_code == 401
 
 
+def test_noop_admin_edit_does_not_invalidate_sessions(client, admin_token):
+    # The admin UI submits the full form, including unchanged fields; resubmitting
+    # current values must not bump token_version (log the user out everywhere).
+    client.post("/api/users", json={"username": "carol", "password": "carolpass1"},
+                headers=_auth(admin_token))
+    login = client.post("/api/auth/login", json={"username": "carol", "password": "carolpass1"})
+    token = login.json()["access_token"]
+
+    users = client.get("/api/users", headers=_auth(admin_token)).json()
+    carol_id = next(u["id"] for u in users if u["username"] == "carol")
+    r = client.put(f"/api/users/{carol_id}",
+                   json={"global_role": "user", "active": True, "password_login_disabled": False},
+                   headers=_auth(admin_token))
+    assert r.status_code == 200
+
+    # Carol's session survives the no-op edit.
+    assert client.get("/api/users/me", headers=_auth(token)).status_code == 200
+
+    # A real role change still invalidates it.
+    r = client.put(f"/api/users/{carol_id}", json={"global_role": "viewer"}, headers=_auth(admin_token))
+    assert r.status_code == 200
+    assert client.get("/api/users/me", headers=_auth(token)).status_code == 401
+
+
 # --- last-admin guard ----------------------------------------------------------------
 
 def test_cannot_demote_last_admin(client, admin_token, db):

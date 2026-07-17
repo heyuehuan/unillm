@@ -20,7 +20,10 @@ export default function Settings({ user, theme, setTheme, onLogout }) {
     setSaving(true)
     setMsg(null)
     try {
-      await api.updateMe({ current_password: pwForm.current_password, new_password: pwForm.new_password })
+      const res = await api.updateMe({ current_password: pwForm.current_password, new_password: pwForm.new_password })
+      // The password change invalidates the old token; store the re-issued one so
+      // the session survives instead of 401-ing on the next request.
+      if (res?.access_token) api.setToken(res.access_token)
       setMsg({ type: 'success', text: 'Password updated successfully' })
       setPwForm({ current_password: '', new_password: '', confirm: '' })
     } catch (e) {

@@ -348,12 +348,21 @@ class UpdateMeRequest(BaseModel):
     new_password: str = Field(..., min_length=_MIN_PASSWORD_LEN, max_length=72)
 
 
+class UpdateMeResponse(BaseModel):
+    user: UserResponse
+    # Fresh token signed with the bumped token_version — the caller's current token
+    # is invalidated by the password change, so without this every password change
+    # immediately logged the user out.
+    access_token: str
+    token_type: str = "bearer"
+
+
 @router.get("/users/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
     return _user_response(current_user)
 
 
-@router.put("/users/me", response_model=UserResponse)
+@router.put("/users/me", response_model=UpdateMeResponse)
 def update_me(
     req: UpdateMeRequest,
     request: Request,
@@ -369,7 +378,7 @@ def update_me(
     db.refresh(current_user)
     _audit(background_tasks, db, "password_changed", request, user=current_user,
            resource_type="user", resource_id=str(current_user.id))
-    return _user_response(current_user)
+    return UpdateMeResponse(user=_user_response(current_user), access_token=_create_token(current_user))
 
 
 @router.get("/users", response_model=List[UserResponse])

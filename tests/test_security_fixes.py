@@ -70,8 +70,10 @@ def test_password_change_invalidates_token(client, admin_token):
                    headers=_auth(token))
     assert r.status_code == 200
 
-    # The old token is now rejected.
+    # The old token is now rejected, but the re-issued token from the response works.
     assert client.get("/api/users/me", headers=_auth(token)).status_code == 401
+    new_token = r.json()["access_token"]
+    assert client.get("/api/users/me", headers=_auth(new_token)).status_code == 200
 
 
 def test_noop_admin_edit_does_not_invalidate_sessions(client, admin_token):

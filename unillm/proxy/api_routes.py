@@ -795,7 +795,10 @@ def list_pricing(_: User = Depends(require_admin), db: Session = Depends(get_db)
     return [_pricing_response(p) for p in crud.list_model_pricing(db)]
 
 
-@router.put("/pricing/{model_name}", response_model=ModelPricingResponse)
+# {model_name:path} — model aliases may contain '/' (e.g. vLLM backends like
+# "Qwen/Qwen2.5"); a plain path param never matches them (ASGI decodes %2F
+# before routing).
+@router.put("/pricing/{model_name:path}", response_model=ModelPricingResponse)
 def upsert_pricing(
     model_name: str,
     req: UpsertModelPricingRequest,
@@ -815,7 +818,7 @@ def upsert_pricing(
     return _pricing_response(pricing)
 
 
-@router.delete("/pricing/{model_name}", status_code=204)
+@router.delete("/pricing/{model_name:path}", status_code=204)
 def delete_pricing(
     model_name: str,
     request: Request,

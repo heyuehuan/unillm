@@ -6,6 +6,7 @@ Uses Google Application Default Credentials for authentication.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -42,6 +43,19 @@ class VertexAIHandler:
         # project it resolves must remain available for every subsequent request.
         self._adc_project: Optional[str] = None
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._cred_lock = asyncio.Lock()
+
+    async def _get_credentials_async(self) -> Tuple[Credentials, Optional[str]]:
+        """
+        Resolve credentials without blocking the event loop.
+
+        Token refresh is a synchronous HTTP call to Google's token endpoint; run it
+        in a worker thread. The lock serializes refreshes so concurrent requests
+        don't all refresh (google.auth credentials are not thread-safe to refresh
+        concurrently). When the token is valid this is just two attribute checks.
+        """
+        async with self._cred_lock:
+            return await asyncio.to_thread(self._get_credentials)
 
     def _get_credentials(self) -> Tuple[Credentials, Optional[str]]:
         """Get or refresh Google Cloud credentials. Returns (credentials, adc_project)."""
@@ -224,7 +238,7 @@ class VertexAIHandler:
         self) so concurrent requests with different overrides can't interleave.
         """
         # Get credentials (and the ADC-default project, if any)
-        credentials, adc_project = self._get_credentials()
+        credentials, adc_project = await self._get_credentials_async()
 
         effective_project = project or self.project or adc_project
         effective_location = location or self.location

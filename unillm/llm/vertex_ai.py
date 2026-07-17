@@ -38,13 +38,15 @@ class VertexAIHandler:
         self.project = project
         self.location = location
         self._credentials: Optional[Credentials] = None
+        # Cached ADC-default project: google.auth.default() only runs once, but the
+        # project it resolves must remain available for every subsequent request.
+        self._adc_project: Optional[str] = None
         self._http_client: Optional[httpx.AsyncClient] = None
-    
+
     def _get_credentials(self) -> Tuple[Credentials, Optional[str]]:
         """Get or refresh Google Cloud credentials. Returns (credentials, adc_project)."""
-        adc_project = None
         if self._credentials is None:
-            self._credentials, adc_project = google.auth.default(
+            self._credentials, self._adc_project = google.auth.default(
                 scopes=["https://www.googleapis.com/auth/cloud-platform"]
             )
 
@@ -53,7 +55,7 @@ class VertexAIHandler:
             request = google.auth.transport.requests.Request()
             self._credentials.refresh(request)
 
-        return self._credentials, adc_project
+        return self._credentials, self._adc_project
     
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create async HTTP client"""

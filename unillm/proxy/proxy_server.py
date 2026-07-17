@@ -55,6 +55,14 @@ general_settings: Dict[str, Any] = {}
 vertex_handlers: Dict[str, VertexAIHandler] = {}
 
 
+def _model_config_params(model_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Parameters of a model config entry, with one precedence used everywhere:
+    unillm_params first, litellm_params as the backward-compatible fallback.
+    """
+    return model_config.get("unillm_params", model_config.get("litellm_params", {}))
+
+
 class ProxyConfig:
     """Proxy configuration manager"""
     
@@ -87,11 +95,9 @@ class ProxyConfig:
         # Initialize handlers for each model
         for model_config in self.model_list:
             model_name = model_config.get("model_name")
-            params = model_config.get("litellm_params", {})
-            
-            # For backward compatibility with litellm config
-            unillm_params = model_config.get("unillm_params", params)
-            
+            # unillm_params preferred, litellm_params kept for backward compatibility
+            unillm_params = _model_config_params(model_config)
+
             project = unillm_params.get("project")
             location = unillm_params.get("location", "us-central1")
             model_type = unillm_params.get("model_type", MODEL_TYPE_VERTEX_AI)
@@ -303,7 +309,7 @@ def _get_actual_model_name(model_name: str) -> str:
     """Get the actual model name to use with Vertex AI"""
     model_config = proxy_config.get_model_config(model_name)
     if model_config:
-        params = model_config.get("litellm_params", model_config.get("unillm_params", {}))
+        params = _model_config_params(model_config)
         actual_model = params.get("model", model_name)
         # Remove vertex_ai/ prefix if present
         if actual_model.startswith("vertex_ai/"):
@@ -316,7 +322,7 @@ def _get_model_params(model_name: str) -> Dict[str, Any]:
     """Get model-specific parameters"""
     model_config = proxy_config.get_model_config(model_name)
     if model_config:
-        return model_config.get("litellm_params", model_config.get("unillm_params", {}))
+        return _model_config_params(model_config)
     return {}
 
 

@@ -6,19 +6,22 @@ enhanced authentication with UniLLM proxy.
 
 Usage:
     from unillm.client import sign_api_key
-    
-    # Simple usage with defaults (uses system username and auto-detected SSH key)
+
+    # Simple usage with defaults (key name '<system-username>--1', auto-detected SSH key)
     signed_key = sign_api_key("sk-your-api-key")
-    
-    # Custom key name and path
+
+    # Custom key name and path. UniLLM registers keys as
+    # '<unillm-username>--<suffix>', so pass key_name explicitly when your
+    # UniLLM username differs from your system username or you registered a
+    # different suffix.
     signed_key = sign_api_key(
         "sk-your-api-key",
-        key_name="my-custom-name",
+        key_name="myuser--laptop",
         private_key_path="~/.ssh/id_ed25519"
     )
-    
+
     # Use the signed key in requests
-    print(signed_key.full_key)  # "sk-your-api-key||username||base64signature"
+    print(signed_key.full_key)  # "sk-your-api-key||myuser--laptop||base64signature"
 """
 
 import base64
@@ -83,12 +86,14 @@ class SignedAPIKey:
 
 def get_default_key_name() -> str:
     """
-    Get the default key name based on system username.
-    
-    Returns:
-        The current system username
+    Get the default key name: '<system-username>--1'.
+
+    UniLLM only registers key names of the form '<unillm-username>--<suffix>',
+    so a bare username could never match a registered key. The default assumes
+    your UniLLM username equals your system username and you registered the
+    suffix '1' (the UI's default); pass key_name explicitly otherwise.
     """
-    return getpass.getuser()
+    return f"{getpass.getuser()}--1"
 
 
 def find_ssh_private_keys(search_paths: Optional[List[str]] = None) -> List[SSHKeyFile]:
@@ -245,7 +250,8 @@ def sign_api_key(
     
     Args:
         api_key: The original API key to sign
-        key_name: Optional key name to include. Defaults to system username.
+        key_name: Optional key name to include. Defaults to '<system-username>--1'
+            (UniLLM key names are always '<unillm-username>--<suffix>').
         private_key_path: Optional path to private key. If None, searches common locations.
         password: Optional password for encrypted private keys
         verbose: If True, print information about key discovery
@@ -260,7 +266,7 @@ def sign_api_key(
     Example:
         >>> signed = sign_api_key("sk-my-api-key")
         >>> print(signed.full_key)
-        'sk-my-api-key||johndoe||base64encodedSignature...'
+        'sk-my-api-key||johndoe--1||base64encodedSignature...'
     """
     # Determine key name
     if key_name is None:
@@ -334,8 +340,8 @@ Examples:
   # Sign with defaults (uses system username and auto-detected SSH key)
   python -m unillm.client.ssh_signer sk-your-api-key
   
-  # Specify custom key name
-  python -m unillm.client.ssh_signer sk-your-api-key --key-name mykey
+  # Specify custom key name (UniLLM key names are '<username>--<suffix>')
+  python -m unillm.client.ssh_signer sk-your-api-key --key-name myuser--laptop
   
   # Specify custom private key path
   python -m unillm.client.ssh_signer sk-your-api-key --private-key ~/.ssh/my_key
@@ -352,7 +358,8 @@ Examples:
     )
     parser.add_argument(
         "--key-name", "-n",
-        help="Key name to use in the signed key (default: system username)"
+        help="Key name to use in the signed key, format '<username>--<suffix>' "
+             "(default: '<system-username>--1')"
     )
     parser.add_argument(
         "--private-key", "-k",

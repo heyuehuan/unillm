@@ -13,6 +13,7 @@ import jwt
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from unillm.config import get_jwt_secret
@@ -381,14 +382,19 @@ def create_user(req: CreateUserRequest, request: Request, background_tasks: Back
                 admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     if crud.get_user_by_username(db, req.username):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
-    user, plaintext_key = crud.create_user(
-        db=db,
-        username=req.username,
-        name=req.name or None,
-        hashed_password=hash_password(req.password),
-        email=req.email or None,
-        global_role=req.global_role,
-    )
+    try:
+        user, plaintext_key = crud.create_user(
+            db=db,
+            username=req.username,
+            name=req.name or None,
+            hashed_password=hash_password(req.password),
+            email=req.email or None,
+            global_role=req.global_role,
+        )
+    except IntegrityError:
+        # Lost a check-then-insert race (or duplicate email) — 409, not a 500.
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username or email already exists")
     _audit(background_tasks, db, "user_created", request, user=admin,
            resource_type="user", resource_id=str(user.id),
            detail={"username": user.username, "role": user.global_role})
@@ -482,7 +488,11 @@ def create_project(req: CreateProjectRequest, request: Request, background_tasks
                    admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     if crud.get_project_by_name(db, req.name):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
-    project = crud.create_project(db, name=req.name, description=req.description, creator_id=admin.id)
+    try:
+        project = crud.create_project(db, name=req.name, description=req.description, creator_id=admin.id)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
     _audit(background_tasks, db, "project_created", request, user=admin,
            resource_type="project", resource_id=str(project.id),
            detail={"name": project.name})
@@ -551,7 +561,11 @@ def add_member(
     target = crud.get_user_by_id(db, req.user_id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    access = crud.add_user_to_project(db, user_id=req.user_id, project_id=project_id, role=req.role)
+    try:
+        access = crud.add_user_to_project(db, user_id=req.user_id, project_id=project_id, role=req.role)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already a member")
     _audit(background_tasks, db, "project_member_added", request, user=current_user,
            resource_type="project", resource_id=str(project_id),
            detail={"user_id": req.user_id, "role": req.role})
@@ -709,6 +723,10 @@ def add_ssh_key(req: AddSSHKeyRequest, request: Request, background_tasks: Backg
         key = crud.add_ssh_key(db, user_id=current_user.id, username=current_user.username, key_name=req.key_name, public_key=req.public_key)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Key name '{req.key_name}' is already in use")
     _audit(background_tasks, db, "ssh_key_added", request, user=current_user,
            resource_type="ssh_key", resource_id=str(key.id),
            detail={"key_name": key.key_name})
@@ -761,6 +779,10 @@ def update_ssh_key(key_id: int, req: UpdateSSHKeyRequest, request: Request, back
                                   key_name=req.key_name, public_key=req.public_key)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Key name '{req.key_name}' is already in use")
     if not key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSH key not found")
     _audit(background_tasks, db, "ssh_key_updated", request, user=current_user,

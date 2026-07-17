@@ -72,6 +72,10 @@ class VLLMHandler:
         **kwargs,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
+        if stream:
+            # Without this the OpenAI streaming protocol omits usage from all
+            # chunks, and streamed requests would be metered as 0 tokens / $0.
+            body["stream_options"] = {"include_usage": True}
         if temperature is not None:
             body["temperature"] = temperature
         if top_p is not None:
@@ -181,6 +185,10 @@ class VLLMHandler:
             "prompt": prompt,
             "stream": stream,
         }
+        if stream:
+            # Without this the OpenAI streaming protocol omits usage from all
+            # chunks, and streamed requests would be metered as 0 tokens / $0.
+            body["stream_options"] = {"include_usage": True}
         if temperature is not None:
             body["temperature"] = temperature
         if top_p is not None:

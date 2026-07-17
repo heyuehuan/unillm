@@ -109,8 +109,11 @@ class VertexAIKMSHandler:
         self.location = location
         self.kms_key_name = kms_key_name
         # Keyed by (model_name, system_instruction) so system-prompted requests are
-        # cached too instead of constructing a fresh model per request.
+        # cached too instead of constructing a fresh model per request. Bounded:
+        # system prompts can be unique per request, and an unbounded cache would
+        # leak memory. Models are cheap to rebuild, so a full clear is fine.
         self._models: Dict[tuple, GenerativeModel] = {}
+        self._models_cache_max = 128
 
     def _get_model(self, model_name: str, project: Optional[str], location: str,
                    kms_key_name: Optional[str],
@@ -129,6 +132,8 @@ class VertexAIKMSHandler:
                 self._models.clear()
             model = self._models.get(cache_key)
             if model is None:
+                if len(self._models) >= self._models_cache_max:
+                    self._models.clear()
                 model = (
                     GenerativeModel(model_name, system_instruction=system_instruction)
                     if system_instruction

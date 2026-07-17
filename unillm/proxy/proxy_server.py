@@ -384,6 +384,32 @@ def _write_request_log(model: str, prompt_tokens: int, completion_tokens: int, *
         db.close()
 
 
+async def _prime_stream(stream):
+    """
+    Await the first chunk of an upstream stream before the response starts.
+
+    StreamingResponse sends 200 headers before iterating the body, so upstream
+    failures (bad model, provider down, quota) must be raised here — while the
+    endpoint can still map them to a real HTTP error — instead of surfacing as a
+    dead connection on an already-started 200. Returns an equivalent stream with
+    the first chunk reattached.
+    """
+    try:
+        first = await stream.__anext__()
+    except StopAsyncIteration:
+        async def _empty():
+            return
+            yield  # pragma: no cover — makes this an async generator
+        return _empty()
+
+    async def _chain():
+        yield first
+        async for chunk in stream:
+            yield chunk
+
+    return _chain()
+
+
 async def _stream_with_logging(stream, model_alias: str, log_fields: Dict[str, Any], start_time: float):
     """
     Wrap an SSE stream: rewrite the model alias, capture the final usage numbers, and
@@ -414,8 +440,11 @@ async def _stream_with_logging(stream, model_alias: str, log_fields: Dict[str, A
             else:
                 yield chunk
     except Exception as e:
-        status_code = 500
+        status_code = _upstream_status(e)
         error_message = str(e)
+        # The 200 header is already out; emit a sanitized SSE error event so the
+        # client sees a structured failure rather than a bare connection drop.
+        yield f"data: {json.dumps({'error': {'message': 'Upstream model provider error', 'type': 'upstream_error'}})}\n\n"
         raise
     finally:
         _write_request_log(
@@ -493,7 +522,9 @@ async def chat_completions(
         response = await handler.chat_completion(**handler_kwargs)
 
         if stream:
-            # The stream wrapper writes the log itself once usage is known.
+            # Prime first so upstream failures become proper HTTP errors (not a
+            # broken 200); the wrapper then writes the log once usage is known.
+            response = await _prime_stream(response)
             return StreamingResponse(
                 _stream_with_logging(response, model, log_fields, start_time),
                 media_type="text/event-stream",
@@ -586,6 +617,9 @@ async def completions(
         response = await handler.text_completion(**handler_kwargs)
 
         if stream:
+            # Prime first so upstream failures become proper HTTP errors (not a
+            # broken 200); the wrapper then writes the log once usage is known.
+            response = await _prime_stream(response)
             return StreamingResponse(
                 _stream_with_logging(response, model, log_fields, start_time),
                 media_type="text/event-stream",

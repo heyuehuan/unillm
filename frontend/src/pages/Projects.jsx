@@ -378,7 +378,9 @@ function ProjectDetail({ project, user, onBack }) {
   const myProjectRole = isGlobalAdmin ? 'admin' : (myMembership?.role ?? 'viewer')
   const canManage = myProjectRole === 'admin'
   const canSeeKeys = myProjectRole !== 'viewer'
-  const canReveal = myProjectRole === 'admin' || myProjectRole === 'developer'
+  // Revealing key plaintext is admin-only on the backend; don't offer the button
+  // to developers only for it to 403.
+  const canReveal = myProjectRole === 'admin'
 
   return (
     <div className="content">

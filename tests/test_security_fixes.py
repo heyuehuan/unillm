@@ -136,6 +136,15 @@ def test_bad_username_rejected(client, admin_token):
     assert r.status_code == 422
 
 
+def test_dev_mode_disabled_when_db_in_use(client, admin_token, monkeypatch):
+    # Even with UNILLM_DEV_MODE=true and no DATABASE_URL env var, a database that
+    # contains real users/keys must not allow-all an invalid API key.
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("UNILLM_DEV_MODE", "true")
+    r = client.get("/v1/models", headers={"Authorization": "Bearer sk-not-a-real-key"})
+    assert r.status_code == 401
+
+
 # --- login safety --------------------------------------------------------------------
 
 def test_login_unknown_user_no_500(client):

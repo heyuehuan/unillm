@@ -5,7 +5,8 @@ Auth order:
   1. DB API key lookup (key_hash match)
   2. Env var fallback (UNILLM_MASTER_KEY / UNILLM_API_KEYS)
   3. Reject — or allow-all if UNILLM_DEV_MODE=true is explicitly set
-     (dev mode is disabled automatically when a database is reachable)
+     (dev mode is disabled automatically when the database is in use, i.e.
+     contains any user or API key)
 
 SSH verification runs on top of key auth when ssh_required is configured.
 """
@@ -40,14 +41,27 @@ def set_general_settings(settings: Dict):
     _general_settings = settings
 
 
-def _is_dev_mode_allowed() -> bool:
+def _is_dev_mode_allowed(db: Optional[Session] = None) -> bool:
     """
     Dev mode (allow-all when no keys configured) requires UNILLM_DEV_MODE=true
-    to be explicitly set. It is never active when a DB is configured.
+    to be explicitly set. It is never active when the database is actually in
+    use: the default deployment runs on SQLite without DATABASE_URL being set,
+    so the env-var check alone would let an invalid key fall through to
+    allow-all on a live instance full of real users and keys.
     """
+    if os.getenv("UNILLM_DEV_MODE", "").lower() != "true":
+        return False
     if os.getenv("DATABASE_URL"):
         return False
-    return os.getenv("UNILLM_DEV_MODE", "").lower() == "true"
+    if db is not None:
+        try:
+            from unillm.db.models import APIKey, User
+            if db.query(User.id).first() is not None or db.query(APIKey.id).first() is not None:
+                return False
+        except Exception:
+            # DB unreachable/uninitialized — treat it as absent.
+            pass
+    return True
 
 
 def get_env_allowed_keys() -> set:
@@ -132,7 +146,7 @@ async def user_api_key_auth(
         return await _apply_ssh(api_key, ssh_mode, auth_result, db)
 
     # --- 3. Dev mode (explicit opt-in only) ---
-    if _is_dev_mode_allowed():
+    if _is_dev_mode_allowed(db):
         verbose_proxy_logger.warning("UNILLM_DEV_MODE=true — allowing unauthenticated request")
         auth_result = UserAPIKeyAuth(api_key=original_api_key, valid=True)
         return await _apply_ssh(api_key, ssh_mode, auth_result, db)

@@ -18,8 +18,9 @@ _handler.setFormatter(
     )
 )
 
+# Attach the handler only to the parent "unillm" logger. "unillm.proxy" propagates
+# to it; giving the child its own handler printed every proxy log line twice.
 verbose_logger.addHandler(_handler)
-verbose_proxy_logger.addHandler(_handler)
 
 # Set default level to WARNING
 verbose_logger.setLevel(logging.WARNING)

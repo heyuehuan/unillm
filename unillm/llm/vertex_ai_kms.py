@@ -58,25 +58,28 @@ def _ensure_vertexai_initialized(
 ) -> bool:
     """
     Call vertexai.init() only when the config has changed. Returns True if re-initialized.
-    Uses a lock because multiple async tasks can trigger this concurrently.
+
+    Caller must hold _global_vertexai_lock: the init and any GenerativeModel
+    construction that depends on it belong to the same critical section, otherwise
+    a concurrent request for a different KMS config can re-init in between and the
+    model ends up bound to the wrong project/key.
     """
     global _global_vertexai_config
     config = (project, location, kms_key_name)
-    with _global_vertexai_lock:
-        if _global_vertexai_config == config:
-            return False
-        verbose_proxy_logger.info(
-            f"Initializing Vertex AI SDK: project={project}, location={location}, "
-            f"kms_key_name={kms_key_name}"
-        )
-        vertexai.init(
-            project=project,
-            location=location,
-            encryption_spec_key_name=kms_key_name,
-        )
-        _global_vertexai_config = config
-        verbose_proxy_logger.info("Vertex AI SDK initialized with CMEK configuration")
-        return True
+    if _global_vertexai_config == config:
+        return False
+    verbose_proxy_logger.info(
+        f"Initializing Vertex AI SDK: project={project}, location={location}, "
+        f"kms_key_name={kms_key_name}"
+    )
+    vertexai.init(
+        project=project,
+        location=location,
+        encryption_spec_key_name=kms_key_name,
+    )
+    _global_vertexai_config = config
+    verbose_proxy_logger.info("Vertex AI SDK initialized with CMEK configuration")
+    return True
 
 
 class VertexAIKMSHandler:
@@ -105,18 +108,35 @@ class VertexAIKMSHandler:
         self.project = project
         self.location = location
         self.kms_key_name = kms_key_name
-        self._models: Dict[str, GenerativeModel] = {}
+        # Keyed by (model_name, system_instruction) so system-prompted requests are
+        # cached too instead of constructing a fresh model per request.
+        self._models: Dict[tuple, GenerativeModel] = {}
 
-    def _get_model(self, model_name: str, project: Optional[str], location: str, kms_key_name: Optional[str]) -> GenerativeModel:
-        """Get or create a GenerativeModel, re-initializing the SDK if config changed."""
-        reinited = _ensure_vertexai_initialized(project, location, kms_key_name)
-        if reinited:
-            # Global config changed — cached models were created under old config.
-            self._models.clear()
-        if model_name not in self._models:
-            self._models[model_name] = GenerativeModel(model_name)
-            verbose_proxy_logger.debug(f"Created GenerativeModel for {model_name}")
-        return self._models[model_name]
+    def _get_model(self, model_name: str, project: Optional[str], location: str,
+                   kms_key_name: Optional[str],
+                   system_instruction: Optional[str] = None) -> GenerativeModel:
+        """
+        Get or create a GenerativeModel, re-initializing the SDK if config changed.
+
+        The check-init-construct sequence runs under the global lock so a concurrent
+        request for a different KMS config can't re-init between the config check
+        and the model construction.
+        """
+        cache_key = (model_name, system_instruction)
+        with _global_vertexai_lock:
+            if _ensure_vertexai_initialized(project, location, kms_key_name):
+                # Global config changed — cached models were created under old config.
+                self._models.clear()
+            model = self._models.get(cache_key)
+            if model is None:
+                model = (
+                    GenerativeModel(model_name, system_instruction=system_instruction)
+                    if system_instruction
+                    else GenerativeModel(model_name)
+                )
+                self._models[cache_key] = model
+                verbose_proxy_logger.debug(f"Created GenerativeModel for {cache_key}")
+            return model
 
     def _convert_messages_to_contents(
         self, messages: List[Dict[str, Any]]
@@ -254,8 +274,6 @@ class VertexAIKMSHandler:
         effective_location = location or self.location
         effective_kms_key_name = kms_key_name or self.kms_key_name
 
-        generative_model = self._get_model(model, effective_project, effective_location, effective_kms_key_name)
-
         system_instruction, contents = self._convert_messages_to_contents(messages)
         generation_config = self._build_generation_config(
             temperature=temperature,
@@ -269,11 +287,8 @@ class VertexAIKMSHandler:
         verbose_proxy_logger.debug(f"Contents count: {len(contents)}")
         verbose_proxy_logger.debug(f"Generation config: {generation_config}")
 
-        model_obj = (
-            GenerativeModel(model, system_instruction=system_instruction)
-            if system_instruction
-            else generative_model
-        )
+        model_obj = self._get_model(model, effective_project, effective_location,
+                                    effective_kms_key_name, system_instruction=system_instruction)
 
         try:
             if stream:
@@ -307,6 +322,7 @@ class VertexAIKMSHandler:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         _sentinel = object()
+        stop = threading.Event()  # set when the consumer goes away (e.g. client disconnect)
 
         def _produce():
             try:
@@ -316,11 +332,15 @@ class VertexAIKMSHandler:
                     stream=True,
                 )
                 for chunk in stream:
+                    if stop.is_set():
+                        return
                     asyncio.run_coroutine_threadsafe(queue.put(chunk), loop).result()
             except Exception as exc:
-                asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
+                if not stop.is_set():
+                    asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
             finally:
-                asyncio.run_coroutine_threadsafe(queue.put(_sentinel), loop).result()
+                if not stop.is_set():
+                    asyncio.run_coroutine_threadsafe(queue.put(_sentinel), loop).result()
 
         thread = threading.Thread(target=_produce, daemon=True)
         thread.start()
@@ -354,7 +374,11 @@ class VertexAIKMSHandler:
                                     }
                                     yield f"data: {json.dumps(openai_chunk)}\n\n"
         finally:
-            thread.join(timeout=30)
+            # Tell the producer to stop and wait for it off the event loop — the old
+            # blocking join(30) could stall the whole loop for up to 30s when a
+            # client disconnected mid-stream.
+            stop.set()
+            await asyncio.to_thread(thread.join, 30)
 
         final_chunk = {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",

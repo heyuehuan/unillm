@@ -148,10 +148,13 @@ class VertexAIHandler:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        n: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Build Gemini generation config from OpenAI parameters"""
         config = {}
-        
+
         if temperature is not None:
             config["temperature"] = temperature
         if top_p is not None:
@@ -163,7 +166,15 @@ class VertexAIHandler:
                 config["stopSequences"] = [stop]
             else:
                 config["stopSequences"] = stop
-        
+        # Only send candidateCount when the client actually asked for multiple
+        # completions (n defaults to 1), keeping default requests unchanged.
+        if n is not None and n > 1:
+            config["candidateCount"] = n
+        if presence_penalty is not None:
+            config["presencePenalty"] = presence_penalty
+        if frequency_penalty is not None:
+            config["frequencyPenalty"] = frequency_penalty
+
         return config
     
     def _convert_gemini_response_to_openai(
@@ -226,6 +237,9 @@ class VertexAIHandler:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        n: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
         stream: bool = False,
         project: Optional[str] = None,
         location: Optional[str] = None,
@@ -250,6 +264,9 @@ class VertexAIHandler:
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop,
+            n=n,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
         )
 
         request_body = {"contents": contents}

@@ -184,6 +184,9 @@ class VertexAIKMSHandler:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        n: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Build Vertex AI generation config from OpenAI parameters"""
         config = {}
@@ -199,6 +202,14 @@ class VertexAIKMSHandler:
                 config["stop_sequences"] = [stop]
             else:
                 config["stop_sequences"] = stop
+        # Only send candidate_count when the client actually asked for multiple
+        # completions (n defaults to 1), keeping default requests unchanged.
+        if n is not None and n > 1:
+            config["candidate_count"] = n
+        if presence_penalty is not None:
+            config["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None:
+            config["frequency_penalty"] = frequency_penalty
 
         return config
 
@@ -259,6 +270,9 @@ class VertexAIKMSHandler:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        n: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
         stream: bool = False,
         project: Optional[str] = None,
         location: Optional[str] = None,
@@ -280,6 +294,9 @@ class VertexAIKMSHandler:
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop,
+            n=n,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
         )
 
         verbose_proxy_logger.debug(f"Vertex AI KMS request for model: {model}")

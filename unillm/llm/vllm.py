@@ -69,6 +69,10 @@ class VLLMHandler:
         max_tokens: Optional[int],
         stop: Optional[Union[str, List[str]]],
         stream: bool,
+        n: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        user: Optional[str] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
@@ -84,6 +88,16 @@ class VLLMHandler:
             body["max_tokens"] = max_tokens
         if stop is not None:
             body["stop"] = stop
+        # n defaults to 1 upstream; only forward an explicit multi-completion ask
+        # so default request bodies stay unchanged.
+        if n is not None and n != 1:
+            body["n"] = n
+        if presence_penalty is not None:
+            body["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None:
+            body["frequency_penalty"] = frequency_penalty
+        if user is not None:
+            body["user"] = user
         return body
 
     def _parse_chat_response(self, data: Dict[str, Any]) -> ChatCompletionResponse:
@@ -124,6 +138,10 @@ class VLLMHandler:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        n: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        user: Optional[str] = None,
         stream: bool = False,
         **kwargs,
     ) -> Union[ChatCompletionResponse, AsyncIterator[str]]:
@@ -137,6 +155,10 @@ class VLLMHandler:
             max_tokens=max_tokens,
             stop=stop,
             stream=stream,
+            n=n,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            user=user,
         )
 
         verbose_proxy_logger.debug(f"vLLM request: POST {url} model={model}")
@@ -175,6 +197,10 @@ class VLLMHandler:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        n: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        user: Optional[str] = None,
         stream: bool = False,
         **kwargs,
     ) -> Union[CompletionResponse, AsyncIterator[str]]:
@@ -197,6 +223,14 @@ class VLLMHandler:
             body["max_tokens"] = max_tokens
         if stop is not None:
             body["stop"] = stop
+        if n is not None and n != 1:
+            body["n"] = n
+        if presence_penalty is not None:
+            body["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None:
+            body["frequency_penalty"] = frequency_penalty
+        if user is not None:
+            body["user"] = user
 
         verbose_proxy_logger.debug(f"vLLM request: POST {url} model={model}")
 

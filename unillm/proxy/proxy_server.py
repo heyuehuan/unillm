@@ -488,6 +488,9 @@ async def chat_completions(
     top_p = request_body.top_p
     max_tokens = request_body.max_tokens
     stop = request_body.stop
+    n = request_body.n
+    presence_penalty = request_body.presence_penalty
+    frequency_penalty = request_body.frequency_penalty
 
     enforce_model_access(user_api_key_dict, model)
 
@@ -518,6 +521,10 @@ async def chat_completions(
             "top_p": top_p,
             "max_tokens": max_tokens,
             "stop": stop,
+            "n": n,
+            "presence_penalty": presence_penalty,
+            "frequency_penalty": frequency_penalty,
+            "user": request_body.user,
             "stream": stream,
             "project": model_params.get("project"),
             "location": model_params.get("location"),
@@ -583,6 +590,9 @@ async def completions(
     top_p = request_body.top_p
     max_tokens = request_body.max_tokens
     stop = request_body.stop
+    n = request_body.n
+    presence_penalty = request_body.presence_penalty
+    frequency_penalty = request_body.frequency_penalty
 
     enforce_model_access(user_api_key_dict, model)
 
@@ -613,6 +623,10 @@ async def completions(
             "top_p": top_p,
             "max_tokens": max_tokens,
             "stop": stop,
+            "n": n,
+            "presence_penalty": presence_penalty,
+            "frequency_penalty": frequency_penalty,
+            "user": request_body.user,
             "stream": stream,
             "project": model_params.get("project"),
             "location": model_params.get("location"),

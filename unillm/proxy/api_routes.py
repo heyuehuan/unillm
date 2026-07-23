@@ -83,12 +83,22 @@ class ProjectResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
+    archived: bool = False
     created_at: datetime
+    # Only populated on list responses (for the project cards)
+    member_count: Optional[int] = None
+    key_count: Optional[int] = None
 
 
 class CreateProjectRequest(BaseModel):
     name: str
     description: Optional[str] = None
+
+
+class UpdateProjectRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    archived: Optional[bool] = None
 
 
 class APIKeyResponse(BaseModel):
@@ -256,8 +266,13 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
-def _project_response(p) -> ProjectResponse:
-    return ProjectResponse(id=p.id, name=p.name, description=p.description, created_at=p.created_at)
+def _project_response(p, counts: Optional[Dict[str, int]] = None) -> ProjectResponse:
+    return ProjectResponse(
+        id=p.id, name=p.name, description=p.description,
+        archived=p.archived, created_at=p.created_at,
+        member_count=counts["members"] if counts else None,
+        key_count=counts["keys"] if counts else None,
+    )
 
 
 def _key_response(k) -> APIKeyResponse:
@@ -344,16 +359,20 @@ def login(req: LoginRequest, request: Request, background_tasks: BackgroundTasks
 # ---------------------------------------------------------------------------
 
 class UpdateMeRequest(BaseModel):
-    current_password: str
-    new_password: str = Field(..., min_length=_MIN_PASSWORD_LEN, max_length=72)
+    # Profile fields — no password confirmation required.
+    name: Optional[str] = None
+    email: Optional[str] = None
+    # Password change — both must be provided together.
+    current_password: Optional[str] = None
+    new_password: Optional[str] = Field(None, min_length=_MIN_PASSWORD_LEN, max_length=72)
 
 
 class UpdateMeResponse(BaseModel):
     user: UserResponse
     # Fresh token signed with the bumped token_version — the caller's current token
-    # is invalidated by the password change, so without this every password change
-    # immediately logged the user out.
-    access_token: str
+    # is invalidated by a password change, so without this every password change
+    # immediately logged the user out. None when only profile fields changed.
+    access_token: Optional[str] = None
     token_type: str = "bearer"
 
 
@@ -370,15 +389,37 @@ def update_me(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if not _verify_password(req.current_password, current_user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
-    current_user.hashed_password = hash_password(req.new_password)
-    current_user.token_version = (current_user.token_version or 0) + 1
-    db.commit()
-    db.refresh(current_user)
-    _audit(background_tasks, db, "password_changed", request, user=current_user,
-           resource_type="user", resource_id=str(current_user.id))
-    return UpdateMeResponse(user=_user_response(current_user), access_token=_create_token(current_user))
+    changes = {}
+    new_token: Optional[str] = None
+
+    if req.new_password is not None:
+        if not req.current_password or not _verify_password(req.current_password, current_user.hashed_password):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+        current_user.hashed_password = hash_password(req.new_password)
+        current_user.token_version = (current_user.token_version or 0) + 1
+        changes["password_changed"] = True
+
+    if "name" in req.model_fields_set and (req.name or None) != current_user.name:
+        current_user.name = req.name or None
+        changes["name"] = req.name
+    if "email" in req.model_fields_set and (req.email or None) != current_user.email:
+        current_user.email = req.email or None
+        changes["email"] = req.email
+
+    if changes:
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This email is already in use")
+        db.refresh(current_user)
+        action = "password_changed" if changes.get("password_changed") else "profile_updated"
+        _audit(background_tasks, db, action, request, user=current_user,
+               resource_type="user", resource_id=str(current_user.id),
+               detail={k: v for k, v in changes.items() if k != "password_changed"} or None)
+        if changes.get("password_changed"):
+            new_token = _create_token(current_user)
+    return UpdateMeResponse(user=_user_response(current_user), access_token=new_token)
 
 
 @router.get("/users", response_model=List[UserResponse])
@@ -472,8 +513,18 @@ def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Reques
 # ---------------------------------------------------------------------------
 
 @router.get("/projects", response_model=List[ProjectResponse])
-def list_projects(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [_project_response(p) for p in crud.get_projects_for_user(db, current_user.id, is_admin=current_user.global_role == "admin")]
+def list_projects(
+    include_archived: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    projects = crud.get_projects_for_user(
+        db, current_user.id,
+        is_admin=current_user.global_role == "admin",
+        include_archived=include_archived,
+    )
+    counts = crud.get_project_counts(db, [p.id for p in projects])
+    return [_project_response(p, counts.get(p.id)) for p in projects]
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
@@ -505,6 +556,44 @@ def create_project(req: CreateProjectRequest, request: Request, background_tasks
     _audit(background_tasks, db, "project_created", request, user=admin,
            resource_type="project", resource_id=str(project.id),
            detail={"name": project.name})
+    return _project_response(project)
+
+
+@router.put("/projects/{project_id}", response_model=ProjectResponse)
+def update_project(
+    project_id: int,
+    req: UpdateProjectRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_project_admin(db, current_user, project_id)
+    project = crud.get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    changes = {}
+    if req.name is not None and req.name != project.name:
+        existing = crud.get_project_by_name(db, req.name)
+        if existing and existing.id != project_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
+        changes["name"] = req.name
+    if "description" in req.model_fields_set and req.description != project.description:
+        changes["description"] = req.description
+    if req.archived is not None and req.archived != project.archived:
+        changes["archived"] = req.archived
+
+    if changes:
+        try:
+            project = crud.update_project(db, project_id, **changes)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
+        action = "project_archived" if changes.get("archived") else (
+            "project_unarchived" if changes.get("archived") is False else "project_updated")
+        _audit(background_tasks, db, action, request, user=current_user,
+               resource_type="project", resource_id=str(project_id), detail=changes)
     return _project_response(project)
 
 
@@ -658,6 +747,39 @@ def create_api_key(
            resource_type="api_key", resource_id=str(key_obj.id),
            detail={"name": key_obj.name, "project_id": project_id, "allowed_models": key_obj.allowed_models})
     return CreateAPIKeyResponse(key=_key_response(key_obj), api_key=plaintext_key)
+
+
+class UpdateAPIKeyRequest(BaseModel):
+    name: Optional[str] = None
+    allowed_models: Optional[List[str]] = None  # None → leave unchanged; [] → no access
+
+
+@router.put("/keys/{key_id}", response_model=APIKeyResponse)
+def update_api_key(
+    key_id: int,
+    req: UpdateAPIKeyRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    key = db.query(APIKey).filter(APIKey.id == key_id).first()
+    if not key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key not found")
+    role = crud.get_user_project_role(db, current_user.id, key.project_id)
+    if role != "admin" and current_user.global_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
+    if not key.active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot edit a revoked key")
+    # The UI sends null for "all models" — normalize like key creation does.
+    allowed = req.allowed_models
+    if "allowed_models" in req.model_fields_set and allowed is None:
+        allowed = ["all"]
+    key = crud.update_api_key(db, key_id, name=req.name, allowed_models=allowed)
+    _audit(background_tasks, db, "api_key_updated", request, user=current_user,
+           resource_type="api_key", resource_id=str(key_id),
+           detail={"name": key.name, "allowed_models": key.allowed_models})
+    return _key_response(key)
 
 
 @router.get("/keys/{key_id}/reveal")
@@ -900,9 +1022,27 @@ def _resolve_project_filter(db, current_user, requested_ids: List[int]) -> Optio
     return accessible
 
 
+def _resolve_ssh_scope(current_user: User, mine: bool, ssh_username: Optional[str]) -> Optional[str]:
+    """
+    Resolve the effective ssh_username filter.
+
+    `mine=true` always means the authenticated user's own username. A raw
+    `ssh_username` value is admin-only — non-admins may only filter by their own
+    username (anything else would let them read another user's per-user stats).
+    """
+    if mine:
+        return current_user.username
+    if ssh_username is not None and current_user.global_role != "admin" \
+            and ssh_username != current_user.username:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only filter by your own SSH username")
+    return ssh_username
+
+
 @router.get("/logs/requests", response_model=PaginatedRequestLogs)
 def get_request_logs(
     project_ids: List[int] = Query(default=[]),
+    mine: bool = False,
     ssh_username: Optional[str] = None,
     model: Optional[str] = None,
     status_code: Optional[int] = None,
@@ -913,11 +1053,18 @@ def get_request_logs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    filter_ids = _resolve_project_filter(db, current_user, project_ids)
+    effective_ssh = _resolve_ssh_scope(current_user, mine, ssh_username)
+    # When filtering by one's own SSH identity, don't also require a project match:
+    # SSH-signed requests through env-var keys have no project_id, and they are
+    # still the caller's own traffic.
+    if mine:
+        filter_ids = [i for i in project_ids] or None
+    else:
+        filter_ids = _resolve_project_filter(db, current_user, project_ids)
 
     rows, total = crud.query_request_logs(
         db, allowed_project_ids=filter_ids,
-        ssh_username=ssh_username,
+        ssh_username=effective_ssh,
         model=model, status_code=status_code,
         from_date=_naive_utc(from_date), to_date=_naive_utc(to_date),
         limit=limit, offset=offset,
@@ -972,10 +1119,15 @@ def get_stats(
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     project_ids: List[int] = Query(default=[]),
+    mine: bool = False,
     ssh_username: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    filter_ids = _resolve_project_filter(db, current_user, project_ids)
+    effective_ssh = _resolve_ssh_scope(current_user, mine, ssh_username)
+    if mine:
+        filter_ids = [i for i in project_ids] or None
+    else:
+        filter_ids = _resolve_project_filter(db, current_user, project_ids)
     return crud.get_request_stats(db, from_date=_naive_utc(from_date), to_date=_naive_utc(to_date),
-                                  allowed_project_ids=filter_ids, ssh_username=ssh_username)
+                                  allowed_project_ids=filter_ids, ssh_username=effective_ssh)

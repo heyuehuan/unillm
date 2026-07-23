@@ -303,16 +303,55 @@ def get_project_by_name(db: Session, name: str) -> Optional[Project]:
     return db.query(Project).filter(Project.name == name).first()
 
 
-def get_projects_for_user(db: Session, user_id: int, is_admin: bool = False) -> List[Project]:
+def get_projects_for_user(db: Session, user_id: int, is_admin: bool = False,
+                          include_archived: bool = False) -> List[Project]:
+    q = db.query(Project)
+    if not include_archived:
+        q = q.filter(Project.archived == False)
     if is_admin:
-        return db.query(Project).order_by(Project.created_at.desc()).all()
+        return q.order_by(Project.created_at.desc()).all()
     return (
-        db.query(Project)
-        .join(UserProjectAccess, UserProjectAccess.project_id == Project.id)
+        q.join(UserProjectAccess, UserProjectAccess.project_id == Project.id)
         .filter(UserProjectAccess.user_id == user_id)
         .order_by(Project.created_at.desc())
         .all()
     )
+
+
+def update_project(db: Session, project_id: int, **changes) -> Optional[Project]:
+    """Apply the given field changes (name / description / archived) to a project."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return None
+    for field, value in changes.items():
+        setattr(project, field, value)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+def get_project_counts(db: Session, project_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    """Member and active-key counts per project, for list displays."""
+    counts: Dict[int, Dict[str, int]] = {pid: {"members": 0, "keys": 0} for pid in project_ids}
+    if not project_ids:
+        return counts
+    member_rows = (
+        db.query(UserProjectAccess.project_id, func.count(UserProjectAccess.user_id))
+        .filter(UserProjectAccess.project_id.in_(project_ids))
+        .group_by(UserProjectAccess.project_id)
+        .all()
+    )
+    for pid, n in member_rows:
+        counts[pid]["members"] = n
+    key_rows = (
+        db.query(APIKey.project_id, func.count(APIKey.id))
+        .filter(APIKey.project_id.in_(project_ids), APIKey.active == True)
+        .group_by(APIKey.project_id)
+        .all()
+    )
+    for pid, n in key_rows:
+        counts[pid]["keys"] = n
+    return counts
 
 
 def create_project(db: Session, name: str, description: Optional[str] = None, creator_id: Optional[int] = None) -> Project:
@@ -410,10 +449,28 @@ def create_api_key(
 
 
 def get_api_keys_for_project(db: Session, project_id: int) -> List[APIKey]:
-    return db.query(APIKey).filter(
-        APIKey.project_id == project_id,
-        APIKey.active == True,
-    ).all()
+    # Includes revoked keys — the UI filters them but offers a "show revoked" view.
+    return (
+        db.query(APIKey)
+        .filter(APIKey.project_id == project_id)
+        .order_by(APIKey.active.desc(), APIKey.created_at.desc())
+        .all()
+    )
+
+
+def update_api_key(db: Session, key_id: int, name: Optional[str] = None,
+                   allowed_models: Optional[List[str]] = None) -> Optional[APIKey]:
+    """Edit a key's name and/or model restriction without rotating the secret."""
+    key = db.query(APIKey).filter(APIKey.id == key_id).first()
+    if not key:
+        return None
+    if name is not None:
+        key.name = name
+    if allowed_models is not None:
+        key.allowed_models = allowed_models
+    db.commit()
+    db.refresh(key)
+    return key
 
 
 def revoke_api_key(db: Session, key_id: int, project_id: int) -> bool:

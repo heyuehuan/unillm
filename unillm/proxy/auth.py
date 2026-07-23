@@ -125,6 +125,12 @@ async def user_api_key_auth(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This account has been disabled",
             )
+        project = crud.get_project_by_id(db, db_key.project_id)
+        if project is not None and project.archived:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This project has been archived",
+            )
         crud.touch_api_key(db, db_key)
         auth_result = UserAPIKeyAuth(
             api_key=original_api_key,

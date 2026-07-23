@@ -15,6 +15,17 @@ export const DEFAULT_FILTERS = {
   projectIds: [],
 }
 
+// Human-readable summary of the active filters, for page subtitles.
+export function describeFilters(filters) {
+  const time = {
+    '24h': 'Last 24 hours', '3d': 'Last 3 days', '7d': 'Last 7 days',
+    all: 'All time', custom: 'Custom range',
+  }[filters.timeRange] || 'All time'
+  if (filters.projectIds.length === 0) return time
+  const proj = filters.projectIds.length === 1 ? '1 project' : `${filters.projectIds.length} projects`
+  return `${time} · ${proj}`
+}
+
 export function filtersToApiParams(filters) {
   const params = {}
   if (filters.projectIds.length) params.project_ids = filters.projectIds
@@ -109,11 +120,13 @@ function ProjectDropdown({ projects, selected, onChange }) {
 }
 
 export function ScopeToggle({ scope, onChange }) {
-  const btn = (key, label) => (
+  const btn = (key, label, title) => (
     <button
       key={key}
       type="button"
       onClick={() => onChange(key)}
+      title={title}
+      aria-label={title}
       style={{
         padding: '3px 10px', fontSize: 12, fontWeight: 500, border: 'none', cursor: 'pointer',
         borderRadius: 4,
@@ -127,8 +140,8 @@ export function ScopeToggle({ scope, onChange }) {
   )
   return (
     <div style={{ display: 'flex', gap: 2, background: 'var(--bg-2)', borderRadius: 6, padding: 2 }}>
-      {btn('all', 'All')}
-      {btn('mine', 'My')}
+      {btn('all', 'All', 'All requests you can see')}
+      {btn('mine', 'My SSH', 'Only requests signed with your SSH key — API-key-only requests are not included')}
     </div>
   )
 }

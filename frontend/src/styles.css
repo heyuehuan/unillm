@@ -23,6 +23,16 @@
   --purple: #9333ea;
   --shadow: 0 1px 2px rgba(0,0,0,.04), 0 1px 1px rgba(0,0,0,.03);
   --shadow-md: 0 4px 16px rgba(0,0,0,.06), 0 2px 4px rgba(0,0,0,.04);
+  /* Chart series palette — assign per series name so a model keeps its color across charts */
+  --chart-1: #f97316;
+  --chart-2: #2563eb;
+  --chart-3: #16a34a;
+  --chart-4: #9333ea;
+  --chart-5: #d97706;
+  --chart-6: #0891b2;
+  --chart-7: #db2777;
+  --chart-8: #65a30d;
+  --topbar-h: 52px;
 }
 [data-theme="dark"] {
   --bg: #0a0a0a;
@@ -49,10 +59,20 @@
   --purple: #a855f7;
   --shadow: 0 1px 2px rgba(0,0,0,.4);
   --shadow-md: 0 8px 24px rgba(0,0,0,.45);
+  --chart-1: #fb923c;
+  --chart-2: #60a5fa;
+  --chart-3: #4ade80;
+  --chart-4: #c084fc;
+  --chart-5: #fbbf24;
+  --chart-6: #22d3ee;
+  --chart-7: #f472b6;
+  --chart-8: #a3e635;
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+/* Theme the root element too, so dark-mode overscroll isn't white */
+html { background: var(--bg); }
 body {
   font-family: 'Inter', -apple-system, system-ui, sans-serif;
   background: var(--bg);
@@ -117,7 +137,7 @@ a { color: inherit; text-decoration: none; }
 /* Main */
 .main { display: flex; flex-direction: column; min-width: 0; }
 .topbar {
-  height: 52px;
+  height: var(--topbar-h);
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center;
   padding: 0 20px;
@@ -313,6 +333,56 @@ a { color: inherit; text-decoration: none; }
   background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
   width: 480px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
   overflow-y: auto; box-shadow: var(--shadow-md);
+}
+
+/* Logs page: flex column filling the viewport below the topbar, so the list
+   height adapts when the filter bar wraps (no magic pixel offsets). */
+.logs-page { display: flex; flex-direction: column; height: calc(100vh - var(--topbar-h)); }
+.logs-body { display: flex; flex: 1; min-height: 0; }
+.log-detail {
+  border-left: 1px solid var(--border);
+  background: var(--bg-1);
+  overflow: auto;
+  padding: 20px;
+  width: 400px;
+  flex-shrink: 0;
+}
+
+/* Project cards grid */
+.project-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+
+/* Allowed-model chips (key create/edit forms) */
+.model-chip {
+  display: inline-flex; align-items: center;
+  padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-size: 12px; font-family: 'JetBrains Mono', monospace;
+  color: var(--text-2); cursor: pointer; user-select: none;
+}
+.model-chip:hover { background: var(--bg-2); }
+.model-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-2); }
+
+/* Confirm dialog */
+.confirm-panel { width: 420px; }
+
+/* Responsive breakpoints */
+@media (max-width: 1100px) {
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .log-detail { width: 340px; }
+}
+@media (max-width: 900px) {
+  .app { grid-template-columns: 60px 1fr; }
+  .sidebar .brand-name, .sidebar .nav-item span, .sidebar .user-info { display: none; }
+  .sidebar .nav-item { justify-content: center; padding: 9px 0; }
+  .sidebar .brand { justify-content: center; padding: 14px 8px; }
+  .sidebar-foot { flex-direction: column; gap: 8px; padding: 10px 6px; }
+  .project-grid, .grid-2 { grid-template-columns: 1fr; }
+  .content { padding: 20px 16px; }
+}
+@media (max-width: 720px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .logs-body { position: relative; }
+  .log-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(400px, 90%); box-shadow: var(--shadow-md); }
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }

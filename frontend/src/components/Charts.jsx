@@ -1,23 +1,3 @@
-export function Sparkline({ data, color = 'var(--accent)', height = 36 }) {
-  if (!data || data.length < 2) return null
-  const w = 120, h = height
-  const max = Math.max(...data), min = Math.min(...data)
-  const rng = max - min || 1
-  const pts = data.map((v, i) => {
-    const x = (i / (data.length - 1)) * w
-    const y = h - ((v - min) / rng) * (h - 4) - 2
-    return [x, y]
-  })
-  const path = pts.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(' ')
-  const area = `${path} L${w},${h} L0,${h} Z`
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none" style={{ display: 'block' }}>
-      <path d={area} fill={color} opacity="0.12" />
-      <path d={path} fill="none" stroke={color} strokeWidth="1.5" />
-    </svg>
-  )
-}
-
 export function BarChart({ data, height = 200 }) {
   if (!data || data.length === 0) return null
   const w = 720, h = height, pad = { l: 120, r: 12, t: 8, b: 8 }

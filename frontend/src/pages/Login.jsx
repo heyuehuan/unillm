@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { api } from '../api.js'
 import { IcLock } from '../components/Icons.jsx'
 
-export default function Login({ onLogin }) {
+export default function Login({ onLogin, sessionExpired = false }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -36,14 +36,21 @@ export default function Login({ onLogin }) {
         <p style={{ color: 'var(--text-2)', textAlign: 'center', margin: '0 0 24px', fontSize: 13 }}>
           Sign in to manage your keys, projects and usage.
         </p>
+        {sessionExpired && !error && (
+          <div className="alert" style={{ background: 'var(--amber-soft)', color: 'var(--amber)', border: '1px solid var(--amber)' }}>
+            Your session expired — sign in to continue where you left off.
+          </div>
+        )}
         {error && <div className="alert error">{error}</div>}
         <div className="field">
-          <label className="label">Username</label>
-          <input className="input" type="text" value={username} onChange={e => setUsername(e.target.value)} placeholder="admin" autoFocus />
+          <label className="label" htmlFor="login-username">Username</label>
+          <input id="login-username" className="input" type="text" value={username}
+            onChange={e => setUsername(e.target.value)} autoComplete="username" autoFocus />
         </div>
         <div className="field">
-          <label className="label">Password</label>
-          <input className="input" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
+          <label className="label" htmlFor="login-password">Password</label>
+          <input id="login-password" className="input" type="password" value={password}
+            onChange={e => setPassword(e.target.value)} autoComplete="current-password" />
         </div>
         <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '10px 12px' }} disabled={loading}>
           <IcLock size={14} /> {loading ? 'Signing in…' : 'Sign in'}

@@ -2,59 +2,63 @@ import { useState, useEffect } from 'react'
 import { api } from '../api.js'
 import { BarChart } from '../components/Charts.jsx'
 import { IcZap, IcDollar, IcSliders, IcRefresh } from '../components/Icons.jsx'
-import FilterBar, { DEFAULT_FILTERS, filtersToApiParams, ScopeToggle } from '../components/FilterBar.jsx'
+import FilterBar, { filtersToApiParams, describeFilters, ScopeToggle } from '../components/FilterBar.jsx'
+import { fmtTokens, LoadError } from '../components/ui.jsx'
 
-function fmtTokens(n) {
-  if (!n) return '0'
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M'
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
-  return String(n)
-}
-
-export default function Usage({ user }) {
+export default function Usage({ user, filters, setFilters, scope, setScope }) {
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [projects, setProjects] = useState([])
-  const [filters, setFilters] = useState(DEFAULT_FILTERS)
-  const [scope, setScope] = useState('all')  // 'all' | 'mine'
 
   useEffect(() => {
     api.getProjects().then(setProjects).catch(() => {})
   }, [])
 
-  async function load(f = filters, s = scope) {
+  async function load() {
     setLoading(true)
+    setLoadError('')
     try {
-      const params = filtersToApiParams(f)
-      if (s === 'mine' && user?.username) params.ssh_username = user.username
+      const params = filtersToApiParams(filters)
+      if (scope === 'mine') params.mine = 'true'
       const st = await api.getStats(params)
       setStats(st)
     } catch (e) {
-      console.error(e)
+      setLoadError(e.message)
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { load(filters, scope) }, [filters, scope])
+  useEffect(() => { load() }, [filters, scope])
 
   const totalReq = stats?.total_requests || 0
   const byStatus = stats?.by_status || {}
-  const okCount = byStatus['200'] || 0
+  // 2xx/3xx are successes — don't count a 201 or 304 as an error.
+  const okCount = Object.entries(byStatus)
+    .filter(([code]) => Number(code) < 400)
+    .reduce((sum, [, count]) => sum + count, 0)
   const errRate = totalReq > 0 ? (((totalReq - okCount) / totalReq) * 100).toFixed(1) : '0.0'
 
-  const COLORS = ['#f97316', '#2563eb', '#16a34a', '#9333ea', '#d97706', '#0891b2', '#db2777', '#65a30d']
+  // Stable color per model: same model gets the same color in both charts,
+  // using the theme's chart palette (dark-mode aware).
+  const byModel = stats?.by_model || []
+  const colorFor = (() => {
+    const names = [...new Set(byModel.map(m => m.model))].sort()
+    const map = new Map(names.map((n, i) => [n, `var(--chart-${(i % 8) + 1})`]))
+    return name => map.get(name)
+  })()
 
-  const modelChart = (stats?.by_model || [])
+  const modelChart = [...byModel]
     .sort((a, b) => b.requests - a.requests)
     .slice(0, 8)
-    .map((m, i) => ({ label: m.model, value: m.requests, display: m.requests.toLocaleString(), color: COLORS[i] }))
+    .map(m => ({ label: m.model, value: m.requests, display: m.requests.toLocaleString(), color: colorFor(m.model) }))
 
-  const costChart = (stats?.by_model || [])
+  const costChart = byModel
     .filter(m => m.cost_usd > 0)
     .sort((a, b) => b.cost_usd - a.cost_usd)
     .slice(0, 8)
-    .map((m, i) => ({ label: m.model, value: m.cost_usd, display: `$${m.cost_usd.toFixed(4)}`, color: COLORS[i] }))
+    .map(m => ({ label: m.model, value: m.cost_usd, display: `$${m.cost_usd.toFixed(4)}`, color: colorFor(m.model) }))
 
   return (
     <div className="content">
@@ -62,7 +66,7 @@ export default function Usage({ user }) {
         <div>
           <h1 className="page-title">Usage</h1>
           <div className="page-sub">
-            {scope === 'mine' ? 'Requests signed with your SSH key' : 'Cumulative breakdown across projects and models'}
+            {describeFilters(filters)} · {scope === 'mine' ? 'your SSH-signed requests' : 'across projects and models'}
           </div>
         </div>
         <div className="h-actions">
@@ -76,9 +80,11 @@ export default function Usage({ user }) {
         <FilterBar projects={projects} filters={filters} onChange={setFilters} />
       </div>
 
+      {loadError && <LoadError message={loadError} onRetry={load} />}
+
       {loading ? (
         <div style={{ color: 'var(--text-3)', padding: '40px 0' }}>Loading…</div>
-      ) : (
+      ) : loadError ? null : (
         <>
           <div className="stat-grid">
             <div className="stat">
@@ -103,7 +109,7 @@ export default function Usage({ user }) {
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+          <div className="grid-2" style={{ marginBottom: 16 }}>
             <div className="card">
               <div className="card-h"><h3>Requests by model</h3></div>
               <div className="card-b">

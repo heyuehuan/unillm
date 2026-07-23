@@ -10,13 +10,14 @@ async function req(method, path, body) {
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  // Session expiry: only force a reload when we actually had a token (i.e. a live
-  // session went stale). A 401 from the login call itself must surface as an error
-  // so the login form can show it — reloading there would loop.
+  // Session expiry: only treat it as a stale session when we actually had a token.
+  // A 401 from the login call itself must surface as an error so the login form
+  // can show it. No reload — App listens for this event and swaps to the login
+  // screen in place, so the hash route (and any other tabs' state) survive.
   if (res.status === 401 && token && path !== '/api/auth/login') {
     localStorage.removeItem('unillm_token')
-    window.location.reload()
-    return
+    window.dispatchEvent(new CustomEvent('unillm:session-expired'))
+    throw new Error('Session expired — please sign in again')
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -53,9 +54,10 @@ export const api = {
   createUser: (data) => req('POST', '/api/users', data),
   updateUser: (id, data) => req('PUT', `/api/users/${id}`, data),
 
-  getProjects: () => req('GET', '/api/projects'),
+  getProjects: (params) => req('GET', `/api/projects${qs(params)}`),
   getProject: (id) => req('GET', `/api/projects/${id}`),
   createProject: (data) => req('POST', '/api/projects', data),
+  updateProject: (id, data) => req('PUT', `/api/projects/${id}`, data),
 
   getMembers: (projectId) => req('GET', `/api/projects/${projectId}/members`),
   addMember: (projectId, data) => req('POST', `/api/projects/${projectId}/members`, data),
@@ -64,6 +66,7 @@ export const api = {
 
   getKeys: (projectId) => req('GET', `/api/projects/${projectId}/keys`),
   createKey: (projectId, data) => req('POST', `/api/projects/${projectId}/keys`, data),
+  updateKey: (keyId, data) => req('PUT', `/api/keys/${keyId}`, data),
   revealKey: (keyId) => req('GET', `/api/keys/${keyId}/reveal`),
   revokeKey: (keyId) => req('DELETE', `/api/keys/${keyId}`),
 

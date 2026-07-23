@@ -1,33 +1,19 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
-import { Sparkline, BarChart } from '../components/Charts.jsx'
+import { navigate } from '../router.js'
+import { BarChart } from '../components/Charts.jsx'
 import { IcZap, IcDollar, IcSliders, IcRefresh, IcChevRight } from '../components/Icons.jsx'
-import FilterBar, { DEFAULT_FILTERS, filtersToApiParams, ScopeToggle } from '../components/FilterBar.jsx'
+import FilterBar, { filtersToApiParams, describeFilters, ScopeToggle } from '../components/FilterBar.jsx'
+import { HttpBadge, fmtTokens, LoadError } from '../components/ui.jsx'
 
-function StatCard({ label, value, sub, icon, sparkData }) {
+function StatCard({ label, value, sub, icon }) {
   return (
     <div className="stat">
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
-        <div>
-          <div className="stat-label">{icon}{label}</div>
-          <div className="stat-value">{value}</div>
-          {sub && <div className="stat-sub">{sub}</div>}
-        </div>
-        {sparkData && sparkData.length > 1 && (
-          <div style={{ width: 80, opacity: 0.8, marginTop: 4 }}>
-            <Sparkline data={sparkData} height={34} />
-          </div>
-        )}
-      </div>
+      <div className="stat-label">{icon}{label}</div>
+      <div className="stat-value">{value}</div>
+      {sub && <div className="stat-sub">{sub}</div>}
     </div>
   )
-}
-
-function HttpBadge({ code }) {
-  if (!code) return <span className="badge">—</span>
-  if (code >= 500) return <span className="badge red">{code}</span>
-  if (code >= 400) return <span className="badge amber">{code}</span>
-  return <span className="badge green">{code}</span>
 }
 
 function fmtTime(iso) {
@@ -35,29 +21,22 @@ function fmtTime(iso) {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-function fmtTokens(n) {
-  if (!n) return '0'
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
-  return String(n)
-}
-
-export default function Dashboard({ user, setRoute }) {
+export default function Dashboard({ user, filters, setFilters, scope, setScope }) {
   const [stats, setStats] = useState(null)
   const [recent, setRecent] = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [projects, setProjects] = useState([])
-  const [filters, setFilters] = useState(DEFAULT_FILTERS)
-  const [scope, setScope] = useState('all')
 
   useEffect(() => {
     api.getProjects().then(setProjects).catch(() => {})
   }, [])
 
-  async function load(f = filters, sc = scope) {
+  async function load() {
     setLoading(true)
-    const p = filtersToApiParams(f)
-    if (sc === 'mine' && user?.username) p.ssh_username = user.username
+    setLoadError('')
+    const p = filtersToApiParams(filters)
+    if (scope === 'mine') p.mine = 'true'
     try {
       const [s, r] = await Promise.all([
         api.getStats(p),
@@ -66,17 +45,13 @@ export default function Dashboard({ user, setRoute }) {
       setStats(s)
       setRecent(r.items || [])
     } catch (e) {
-      console.error(e)
+      setLoadError(e.message)
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { load(filters, scope) }, [filters, scope])
-
-  function handleFiltersChange(f) {
-    setFilters(f)
-  }
+  useEffect(() => { load() }, [filters, scope])
 
   const modelChart = stats?.by_model?.slice(0, 6).map(m => ({
     label: m.model,
@@ -85,15 +60,16 @@ export default function Dashboard({ user, setRoute }) {
   })) || []
 
   const isAdmin = user?.global_role === 'admin'
+  const scopeLabel = scope === 'mine'
+    ? 'your SSH-signed requests'
+    : isAdmin ? 'org-wide' : 'across your projects'
 
   return (
     <div className="content">
       <div className="page-h">
         <div>
           <h1 className="page-title">Dashboard</h1>
-          <div className="page-sub">
-            {isAdmin ? 'All-time stats · org-wide' : 'Stats across your projects'}
-          </div>
+          <div className="page-sub">{describeFilters(filters)} · {scopeLabel}</div>
         </div>
         <div className="h-actions">
           <button className="btn" onClick={() => load()}><IcRefresh size={14} /> Refresh</button>
@@ -103,12 +79,14 @@ export default function Dashboard({ user, setRoute }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
         <ScopeToggle scope={scope} onChange={setScope} />
         <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
-        <FilterBar projects={projects} filters={filters} onChange={handleFiltersChange} />
+        <FilterBar projects={projects} filters={filters} onChange={setFilters} />
       </div>
+
+      {loadError && <LoadError message={loadError} onRetry={load} />}
 
       {loading ? (
         <div style={{ color: 'var(--text-3)', padding: '40px 0' }}>Loading…</div>
-      ) : (
+      ) : loadError ? null : (
         <>
           <div className="stat-grid">
             <StatCard
@@ -146,8 +124,8 @@ export default function Dashboard({ user, setRoute }) {
 
           <div className="card">
             <div className="card-h">
-              <div><h3>Recent requests</h3><div className="sub">Latest activity</div></div>
-              <button className="btn sm ghost" onClick={() => setRoute('logs')}>
+              <div><h3>Recent requests</h3><div className="sub">Latest activity — click a row for details</div></div>
+              <button className="btn sm ghost" onClick={() => navigate('logs')}>
                 View all <IcChevRight size={13} />
               </button>
             </div>
@@ -159,7 +137,7 @@ export default function Dashboard({ user, setRoute }) {
             ) : (
               <div>
                 {recent.map(r => (
-                  <div key={r.id} className="log-row" style={{ cursor: 'default' }}>
+                  <div key={r.id} className="log-row" onClick={() => navigate('logs', { sel: r.id })}>
                     <span className="log-time">{fmtTime(r.created_at)}</span>
                     <span className="log-status"><HttpBadge code={r.status_code} /></span>
                     <span className="log-model mono" style={{ fontSize: 12 }}>{r.model}</span>
@@ -167,7 +145,7 @@ export default function Dashboard({ user, setRoute }) {
                       <span style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--bg-2)', borderRadius: 4, padding: '1px 6px', flexShrink: 0 }}>{r.project_name}</span>
                     )}
                     {r.api_key_name && (
-                      <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'monospace', flexShrink: 0 }}>{r.api_key_name}</span>
+                      <span className="mono" style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>{r.api_key_name}</span>
                     )}
                     <span className="log-msg" style={{ color: 'var(--text-2)' }}>
                       {r.error_message || `${r.prompt_tokens} in · ${r.completion_tokens} out tokens`}

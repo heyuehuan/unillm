@@ -21,15 +21,21 @@ const STATUS = {
 
 function PricingOverlay({ model, onClose }) {
   const p = model.pricing
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
   return (
-    <div className="overlay-backdrop" onClick={onClose}>
-      <div className="overlay-panel" onClick={e => e.stopPropagation()}>
+    <div className="overlay-backdrop" onClick={onClose} role="presentation">
+      <div className="overlay-panel" role="dialog" aria-modal="true" aria-label={`${model.name} pricing`}
+        onClick={e => e.stopPropagation()}>
         <div className="card-h">
           <div>
             <h3 style={{ margin: 0 }}>{model.name}</h3>
             <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>Pricing details</div>
           </div>
-          <button className="iconbtn" onClick={onClose}><IcX size={14} /></button>
+          <button className="iconbtn" aria-label="Close" onClick={onClose}><IcX size={14} /></button>
         </div>
         <div className="card-b">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: p.notes ? 16 : 0 }}>

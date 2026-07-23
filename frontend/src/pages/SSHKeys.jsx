@@ -1,25 +1,11 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
 import { IcPlus, IcTrash, IcEdit, IcX, IcCheck } from '../components/Icons.jsx'
+import { fmtDate, fmtRelative, copyText, useConfirm } from '../components/ui.jsx'
 
 const SUFFIX_MAX = 20
+const MAX_KEYS = 3
 const CHALLENGE = 'sk-12345678'
-
-function fmtDate(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString()
-}
-
-function fmtRelative(iso) {
-  if (!iso) return 'never'
-  const diff = Date.now() - new Date(iso).getTime()
-  const m = Math.floor(diff / 60000)
-  if (m < 1) return 'just now'
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
-}
 
 function keyPrefix(username) { return `${username}--` }
 
@@ -153,18 +139,17 @@ const SIGN_METHODS = [
 ]
 
 function CodeBlock({ children }) {
-  const [copied, setCopied] = useState(false)
-  function copy() {
-    navigator.clipboard.writeText(children).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
+  const [state, setState] = useState('idle')
+  async function copy() {
+    const ok = await copyText(children)
+    setState(ok ? 'copied' : 'failed')
+    setTimeout(() => setState('idle'), 1800)
   }
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
       <div style={{ display: 'flex', justifyContent: 'flex-end', background: 'var(--bg-2)', borderBottom: '1px solid var(--border)', padding: '3px 6px' }}>
         <button type="button" className="btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={copy}>
-          {copied ? <><IcCheck size={11} /> Copied</> : 'Copy'}
+          {state === 'copied' ? <><IcCheck size={11} /> Copied</> : state === 'failed' ? 'Copy failed — select manually' : 'Copy'}
         </button>
       </div>
       <div style={{ background: 'var(--bg-2)', padding: '8px 12px', fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5, color: 'var(--text)', whiteSpace: 'pre', overflowX: 'auto' }}>
@@ -195,7 +180,7 @@ function ValidatePanel({ onClose, keys }) {
     }
   }
 
-  const kn = keyName || 'key1'
+  const kn = keyName || keys[0]?.key_name || 'your-key-name'
   const kp = keyPath || '~/.ssh/id_rsa'
 
   const opensslPemCmd     = `echo "${CHALLENGE}||${kn}||$(printf '%s' '${CHALLENGE}' | openssl dgst -sha256 -sign ${kp} | base64 | tr -d '\\n')"`
@@ -214,8 +199,10 @@ function ValidatePanel({ onClose, keys }) {
         <div style={{ display: 'flex', gap: 12 }}>
           <div style={{ flex: 1 }}>
             <label className="label">Key name</label>
-            <input className="input" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}
-              value={keyName} onChange={e => setKeyName(e.target.value)} placeholder="key1" />
+            <select className="select" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}
+              value={keyName} onChange={e => setKeyName(e.target.value)}>
+              {keys.map(k => <option key={k.id} value={k.key_name}>{k.key_name}</option>)}
+            </select>
           </div>
           <div style={{ flex: 2 }}>
             <label className="label">Key path</label>
@@ -289,6 +276,7 @@ function ValidatePanel({ onClose, keys }) {
 }
 
 export default function SSHKeys({ user }) {
+  const confirm = useConfirm()
   const [keys, setKeys] = useState([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
@@ -333,7 +321,12 @@ export default function SSHKeys({ user }) {
   }
 
   async function deleteKey(id) {
-    if (!confirm('Delete this SSH key? This cannot be undone.')) return
+    const key = keys.find(k => k.id === id)
+    const ok = await confirm(
+      `Delete the SSH key "${key?.key_name || ''}"? Requests signed with it will stop authenticating. This cannot be undone.`,
+      { title: 'Delete SSH key', confirmLabel: 'Delete key', danger: true },
+    )
+    if (!ok) return
     try { await api.deleteSSHKey(id); await load() }
     catch (e) { setError(e.message) }
   }
@@ -343,7 +336,7 @@ export default function SSHKeys({ user }) {
     load()
   }
 
-  const canAdd = keys.length < 3
+  const canAdd = keys.length < MAX_KEYS
 
   return (
     <div className="content" style={{ maxWidth: 720 }}>
@@ -356,8 +349,11 @@ export default function SSHKeys({ user }) {
           {keys.length > 0 && !showValidate && (
             <button className="btn" onClick={openValidate}>Validate my key</button>
           )}
-          {canAdd && !showAdd && (
-            <button className="btn primary" onClick={openAdd}><IcPlus size={14} /> Add key</button>
+          {!showAdd && (
+            <button className="btn primary" onClick={openAdd} disabled={!canAdd}
+              title={canAdd ? undefined : `Limit of ${MAX_KEYS} keys reached — delete one to add another`}>
+              <IcPlus size={14} /> Add key
+            </button>
           )}
         </div>
       </div>
@@ -412,7 +408,9 @@ export default function SSHKeys({ user }) {
       ) : (
         <>
           {keys.map(k => <KeyCard key={k.id} k={k} username={user.username} onSave={saveKey} onDelete={deleteKey} />)}
-          <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>{keys.length}/3 keys used</div>
+          <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>
+            {keys.length}/{MAX_KEYS} keys used{!canAdd && ' — delete a key to add another'}
+          </div>
         </>
       )}
     </div>

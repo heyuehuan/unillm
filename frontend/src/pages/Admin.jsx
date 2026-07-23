@@ -1,10 +1,24 @@
-import { useState, useEffect } from 'react'
+import { Fragment, useState, useEffect } from 'react'
 import { api } from '../api.js'
+import { navigate } from '../router.js'
 import { IcPlus, IcTrash, IcX, IcEdit, IcRefresh } from '../components/Icons.jsx'
+import { fmtDateTime, useConfirm, CopyButton } from '../components/ui.jsx'
 
-function fmtDate(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleString()
+const GLOBAL_ROLES = [
+  { id: 'user', label: 'User', hint: 'Normal account — gets a personal project and API key' },
+  { id: 'viewer', label: 'Viewer', hint: 'Read-only — no personal project or API key' },
+  { id: 'admin', label: 'Admin', hint: 'Full access to all projects, users, and settings' },
+]
+
+function GlobalRoleSelect({ value, onChange }) {
+  return (
+    <>
+      <select className="select" value={value} onChange={e => onChange(e.target.value)}>
+        {GLOBAL_ROLES.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+      </select>
+      <div className="hint">{GLOBAL_ROLES.find(r => r.id === value)?.hint}</div>
+    </>
+  )
 }
 
 function EditUserModal({ user, onClose, onSaved }) {
@@ -38,7 +52,7 @@ function EditUserModal({ user, onClose, onSaved }) {
     <div className="card" style={{ marginBottom: 16, borderColor: 'var(--accent)' }}>
       <div className="card-h">
         <h3>Edit <span className="mono">{user.username}</span></h3>
-        <button className="iconbtn" onClick={onClose}><IcX size={14} /></button>
+        <button className="iconbtn" aria-label="Close" onClick={onClose}><IcX size={14} /></button>
       </div>
       <form className="card-b" onSubmit={save} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {error && <div className="alert error">{error}</div>}
@@ -50,16 +64,14 @@ function EditUserModal({ user, onClose, onSaved }) {
           </div>
           <div>
             <label className="label">Role</label>
-            <select className="select" value={form.global_role} onChange={e => setForm(f => ({ ...f, global_role: e.target.value }))}>
-              <option value="user">User</option>
-              <option value="viewer">Viewer</option>
-              <option value="admin">Admin</option>
-            </select>
+            <GlobalRoleSelect value={form.global_role} onChange={v => setForm(f => ({ ...f, global_role: v }))} />
           </div>
           <div>
             <label className="label">Reset password</label>
             <input className="input" type="password" placeholder="Leave blank to keep current"
+              minLength={8} maxLength={72} autoComplete="new-password"
               value={form.new_password} onChange={e => setForm(f => ({ ...f, new_password: e.target.value }))} />
+            <div className="hint">At least 8 characters. Resetting signs the user out everywhere.</div>
           </div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -133,14 +145,14 @@ function UsersTab({ currentUser }) {
                     <div style={{ fontSize: 12.5, color: 'var(--text-2)', marginTop: 4 }}>Initial API key (shown once):</div>
                     <div className="key-display" style={{ marginTop: 8 }}>
                       <span className="key-val">{justCreated.key}</span>
-                      <button className="btn sm" onClick={() => navigator.clipboard.writeText(justCreated.key)}>Copy</button>
+                      <CopyButton text={justCreated.key} />
                     </div>
                   </>
                 ) : (
                   <div style={{ fontSize: 12.5, color: 'var(--text-2)', marginTop: 4 }}>Viewer account — no personal project or API key.</div>
                 )}
               </div>
-              <button className="iconbtn" onClick={() => setJustCreated(null)}><IcX size={14} /></button>
+              <button className="iconbtn" aria-label="Dismiss" onClick={() => setJustCreated(null)}><IcX size={14} /></button>
             </div>
           </div>
         </div>
@@ -158,13 +170,16 @@ function UsersTab({ currentUser }) {
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-h">
             <h3>Create user</h3>
-            <button className="iconbtn" onClick={() => setShowCreate(false)}><IcX size={14} /></button>
+            <button className="iconbtn" aria-label="Close" onClick={() => setShowCreate(false)}><IcX size={14} /></button>
           </div>
           <form className="card-b" onSubmit={create}>
             <div className="grid-2" style={{ marginBottom: 14 }}>
               <div>
                 <label className="label">Username</label>
-                <input className="input" required value={form.username} onChange={e => setForm(f => ({ ...f, username: e.target.value }))} />
+                <input className="input" required value={form.username}
+                  pattern="[a-zA-Z0-9_.\-]{2,32}" title="2–32 characters: letters, numbers, dot, dash, underscore"
+                  onChange={e => setForm(f => ({ ...f, username: e.target.value }))} />
+                <div className="hint">2–32 characters: letters, numbers, <span className="mono">. - _</span></div>
               </div>
               <div>
                 <label className="label">Name</label>
@@ -172,7 +187,10 @@ function UsersTab({ currentUser }) {
               </div>
               <div>
                 <label className="label">Password</label>
-                <input className="input" type="password" required value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} />
+                <input className="input" type="password" required minLength={8} maxLength={72}
+                  autoComplete="new-password"
+                  value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} />
+                <div className="hint">At least 8 characters.</div>
               </div>
               <div>
                 <label className="label">Email</label>
@@ -180,11 +198,7 @@ function UsersTab({ currentUser }) {
               </div>
               <div>
                 <label className="label">Role</label>
-                <select className="select" value={form.global_role} onChange={e => setForm(f => ({ ...f, global_role: e.target.value }))}>
-                  <option value="user">User</option>
-                  <option value="viewer">Viewer</option>
-                  <option value="admin">Admin</option>
-                </select>
+                <GlobalRoleSelect value={form.global_role} onChange={v => setForm(f => ({ ...f, global_role: v }))} />
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -215,15 +229,18 @@ function UsersTab({ currentUser }) {
                   </td>
                   <td style={{ color: 'var(--text-2)' }}>{u.name || '—'}</td>
                   <td>
-                    <span className={`badge ${u.global_role === 'admin' ? 'accent' : ''}`}>{u.global_role}</span>
+                    <span className={`badge ${u.global_role === 'admin' ? 'accent' : ''}`}
+                      title={GLOBAL_ROLES.find(r => r.id === u.global_role)?.hint}>{u.global_role}</span>
                   </td>
                   <td style={{ color: 'var(--text-2)' }}>{u.email || '—'}</td>
-                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{fmtDate(u.created_at)}</td>
+                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{fmtDateTime(u.created_at)}</td>
                   <td>
-                    {u.id !== currentUser.id && (
-                      <button className="iconbtn" title="Edit" onClick={() => { setEditingUser(u); setShowCreate(false) }}>
+                    {u.id !== currentUser.id ? (
+                      <button className="iconbtn" title="Edit" aria-label={`Edit ${u.username}`} onClick={() => { setEditingUser(u); setShowCreate(false) }}>
                         <IcEdit size={14} />
                       </button>
+                    ) : (
+                      <span style={{ fontSize: 11, color: 'var(--text-3)' }} title="Edit your own profile in Settings">you</span>
                     )}
                   </td>
                 </tr>
@@ -238,6 +255,7 @@ function UsersTab({ currentUser }) {
 
 // ── Pricing tab ────────────────────────────────────────────
 function PricingTab() {
+  const confirm = useConfirm()
   const [pricing, setPricing] = useState([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
@@ -268,7 +286,11 @@ function PricingTab() {
   }
 
   async function del(modelName) {
-    if (!confirm(`Delete pricing for ${modelName}?`)) return
+    const ok = await confirm(
+      `Delete pricing for ${modelName}? New requests for this model will no longer get a cost estimate.`,
+      { title: 'Delete pricing', confirmLabel: 'Delete', danger: true },
+    )
+    if (!ok) return
     try { await api.deletePricing(modelName); await load() } catch (e) { setError(e.message) }
   }
 
@@ -287,7 +309,7 @@ function PricingTab() {
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-h">
             <h3>Add / update pricing</h3>
-            <button className="iconbtn" onClick={() => setShowAdd(false)}><IcX size={14} /></button>
+            <button className="iconbtn" aria-label="Close" onClick={() => setShowAdd(false)}><IcX size={14} /></button>
           </div>
           <form className="card-b" onSubmit={save}>
             <div className="grid-2" style={{ marginBottom: 14 }}>
@@ -302,11 +324,11 @@ function PricingTab() {
               </div>
               <div>
                 <label className="label">Input price ($/1M tokens)</label>
-                <input className="input" type="number" step="0.01" required value={form.input_per_1m} onChange={e => setForm(f => ({ ...f, input_per_1m: e.target.value }))} placeholder="e.g. 2.50" />
+                <input className="input" type="number" step="0.01" min="0" required value={form.input_per_1m} onChange={e => setForm(f => ({ ...f, input_per_1m: e.target.value }))} placeholder="e.g. 2.50" />
               </div>
               <div>
                 <label className="label">Output price ($/1M tokens)</label>
-                <input className="input" type="number" step="0.01" required value={form.output_per_1m} onChange={e => setForm(f => ({ ...f, output_per_1m: e.target.value }))} placeholder="e.g. 10.00" />
+                <input className="input" type="number" step="0.01" min="0" required value={form.output_per_1m} onChange={e => setForm(f => ({ ...f, output_per_1m: e.target.value }))} placeholder="e.g. 10.00" />
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -339,9 +361,9 @@ function PricingTab() {
                   <td className="num mono">${p.input_per_1m.toFixed(2)}</td>
                   <td className="num mono">${p.output_per_1m.toFixed(2)}</td>
                   <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{p.notes || '—'}</td>
-                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{fmtDate(p.updated_at)}</td>
+                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{fmtDateTime(p.updated_at)}</td>
                   <td>
-                    <button className="btn sm danger" onClick={() => del(p.model_name)}><IcTrash size={12} /></button>
+                    <button className="btn sm danger" aria-label={`Delete pricing for ${p.model_name}`} onClick={() => del(p.model_name)}><IcTrash size={12} /></button>
                   </td>
                 </tr>
               ))}
@@ -354,29 +376,69 @@ function PricingTab() {
 }
 
 // ── Audit tab ──────────────────────────────────────────────
+const SEVERITIES = ['info', 'warning', 'error', 'critical']
+
 function AuditTab() {
   const [logs, setLogs] = useState([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [offset, setOffset] = useState(0)
+  const [severity, setSeverity] = useState('')
+  const [action, setAction] = useState('')
+  const [userId, setUserId] = useState('')
+  const [users, setUsers] = useState([])
+  const [expanded, setExpanded] = useState(null)
   const LIMIT = 50
+
+  useEffect(() => {
+    api.getUsers().then(setUsers).catch(() => {})
+  }, [])
+
+  // Debounce the free-text action filter.
+  const [debouncedAction, setDebouncedAction] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => { setDebouncedAction(action); setOffset(0) }, 350)
+    return () => clearTimeout(t)
+  }, [action])
 
   async function load() {
     setLoading(true)
+    setLoadError('')
     try {
-      const res = await api.getAudit({ limit: LIMIT, offset })
+      const res = await api.getAudit({
+        limit: LIMIT, offset,
+        severity: severity || undefined,
+        action: debouncedAction || undefined,
+        user_id: userId || undefined,
+      })
       setLogs(res.items || [])
       setTotal(res.total || 0)
-    } catch (e) { console.error(e) } finally { setLoading(false) }
+    } catch (e) { setLoadError(e.message) } finally { setLoading(false) }
   }
-  useEffect(() => { load() }, [offset])
+  useEffect(() => { load() }, [offset, severity, debouncedAction, userId])
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 13, color: 'var(--text-2)' }}>{total} events</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+        <input className="input" style={{ width: 180 }} placeholder="Filter by action…" aria-label="Filter by action"
+          value={action} onChange={e => setAction(e.target.value)} />
+        <select className="select" style={{ width: 'auto' }} aria-label="Filter by severity"
+          value={severity} onChange={e => { setSeverity(e.target.value); setOffset(0) }}>
+          <option value="">All severities</option>
+          {SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <select className="select" style={{ width: 'auto' }} aria-label="Filter by actor"
+          value={userId} onChange={e => { setUserId(e.target.value); setOffset(0) }}>
+          <option value="">All actors</option>
+          {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
+        </select>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{total} events</span>
         <button className="btn sm" onClick={load}><IcRefresh size={13} /> Refresh</button>
       </div>
+
+      {loadError && <div className="alert error">{loadError}</div>}
 
       {loading ? (
         <div style={{ color: 'var(--text-3)' }}>Loading…</div>
@@ -384,6 +446,7 @@ function AuditTab() {
         <div className="card">
           <div className="empty">
             <div className="empty-title">No audit events</div>
+            <div style={{ fontSize: 12 }}>No events match the current filters.</div>
           </div>
         </div>
       ) : (
@@ -394,19 +457,38 @@ function AuditTab() {
             </thead>
             <tbody>
               {logs.map(a => (
-                <tr key={a.id} className="row-hover">
-                  <td className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{fmtDate(a.created_at)}</td>
-                  <td style={{ fontSize: 13 }}>{a.username || <span style={{ color: 'var(--text-3)' }}>system</span>}</td>
-                  <td style={{ fontWeight: 500 }}>{a.action.replace(/_/g, ' ')}</td>
-                  <td style={{ fontSize: 12, color: 'var(--text-2)' }}>
-                    {a.resource_type && <span className="mono">{a.resource_type}/{a.resource_id || '—'}</span>}
-                  </td>
-                  <td>
-                    <span className={`badge ${a.severity === 'warning' ? 'amber' : a.severity === 'error' ? 'red' : ''}`}>
-                      {a.severity}
-                    </span>
-                  </td>
-                </tr>
+                <Fragment key={a.id}>
+                  <tr className="row-hover" onClick={() => setExpanded(expanded === a.id ? null : a.id)}>
+                    <td className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{fmtDateTime(a.created_at)}</td>
+                    <td style={{ fontSize: 13 }}>{a.username || <span style={{ color: 'var(--text-3)' }}>system</span>}</td>
+                    <td style={{ fontWeight: 500 }}>{a.action.replace(/_/g, ' ')}</td>
+                    <td style={{ fontSize: 12, color: 'var(--text-2)' }}>
+                      {a.resource_type && <span className="mono">{a.resource_type}/{a.resource_id || '—'}</span>}
+                    </td>
+                    <td>
+                      <span className={`badge ${a.severity === 'warning' ? 'amber' : (a.severity === 'error' || a.severity === 'critical') ? 'red' : ''}`}>
+                        {a.severity}
+                      </span>
+                    </td>
+                  </tr>
+                  {expanded === a.id && (
+                    <tr>
+                      <td colSpan={5} style={{ background: 'var(--bg-1)', fontSize: 12 }}>
+                        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', color: 'var(--text-2)' }}>
+                          <span>IP: <span className="mono">{a.ip_address || '—'}</span></span>
+                          <span style={{ maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            Agent: <span className="mono">{a.user_agent || '—'}</span>
+                          </span>
+                        </div>
+                        {a.detail && (
+                          <pre style={{ margin: '8px 0 0', padding: 10, background: 'var(--bg-2)', borderRadius: 6, fontSize: 11.5, fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                            {JSON.stringify(a.detail, null, 2)}
+                          </pre>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -426,8 +508,8 @@ function AuditTab() {
 }
 
 // ── Main Admin page ────────────────────────────────────────
-export default function Admin({ currentUser }) {
-  const [tab, setTab] = useState('users')
+export default function Admin({ currentUser, tab = 'users' }) {
+  const activeTab = ['users', 'pricing', 'audit'].includes(tab) ? tab : 'users'
   return (
     <div className="content">
       <div className="page-h">
@@ -439,15 +521,15 @@ export default function Admin({ currentUser }) {
 
       <div className="tabs">
         {[['users', 'Users'], ['pricing', 'Model Pricing'], ['audit', 'Audit Log']].map(([id, label]) => (
-          <button key={id} className={`tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
+          <button key={id} className={`tab${activeTab === id ? ' active' : ''}`} onClick={() => navigate(`admin/${id}`)}>
             {label}
           </button>
         ))}
       </div>
 
-      {tab === 'users' && <UsersTab currentUser={currentUser} />}
-      {tab === 'pricing' && <PricingTab />}
-      {tab === 'audit' && <AuditTab />}
+      {activeTab === 'users' && <UsersTab currentUser={currentUser} />}
+      {activeTab === 'pricing' && <PricingTab />}
+      {activeTab === 'audit' && <AuditTab />}
     </div>
   )
 }

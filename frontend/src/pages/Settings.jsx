@@ -1,15 +1,30 @@
 import { useState } from 'react'
 import { api } from '../api.js'
+import { fmtDate } from '../components/ui.jsx'
 
-function fmtDate(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString()
-}
+export default function Settings({ user, theme, setTheme, onUserUpdated, onLogout }) {
+  const [profile, setProfile] = useState({ name: user?.name || '', email: user?.email || '' })
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileMsg, setProfileMsg] = useState(null)
 
-export default function Settings({ user, theme, setTheme, onLogout }) {
   const [pwForm, setPwForm] = useState({ current_password: '', new_password: '', confirm: '' })
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
+
+  async function saveProfile(e) {
+    e.preventDefault()
+    setProfileSaving(true)
+    setProfileMsg(null)
+    try {
+      const res = await api.updateMe({ name: profile.name || null, email: profile.email || null })
+      if (res?.user) onUserUpdated?.(res.user)
+      setProfileMsg({ type: 'success', text: 'Profile updated' })
+    } catch (e) {
+      setProfileMsg({ type: 'error', text: e.message })
+    } finally {
+      setProfileSaving(false)
+    }
+  }
 
   async function changePassword(e) {
     e.preventDefault()
@@ -46,7 +61,7 @@ export default function Settings({ user, theme, setTheme, onLogout }) {
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-h"><h3>Profile</h3></div>
-        <div className="card-b">
+        <form className="card-b" onSubmit={saveProfile}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 18 }}>
             <div className="avatar" style={{ width: 54, height: 54, fontSize: 20, background: 'var(--accent)', color: '#fff' }}>
               {initials}
@@ -54,14 +69,27 @@ export default function Settings({ user, theme, setTheme, onLogout }) {
             <div>
               <div style={{ fontWeight: 600, fontSize: 16 }}>{user?.username}</div>
               <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
-                {user?.email || 'No email set'} · {user?.global_role}
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
-                Joined {fmtDate(user?.created_at)}
+                {user?.global_role} · Joined {fmtDate(user?.created_at)}
               </div>
             </div>
           </div>
-        </div>
+          {profileMsg && <div className={`alert ${profileMsg.type}`}>{profileMsg.text}</div>}
+          <div className="grid-2" style={{ marginBottom: 14 }}>
+            <div>
+              <label className="label">Display name</label>
+              <input className="input" value={profile.name} placeholder="Your name"
+                onChange={e => setProfile(p => ({ ...p, name: e.target.value }))} />
+            </div>
+            <div>
+              <label className="label">Email</label>
+              <input className="input" type="email" value={profile.email} placeholder="you@example.com"
+                onChange={e => setProfile(p => ({ ...p, email: e.target.value }))} />
+            </div>
+          </div>
+          <button type="submit" className="btn primary" disabled={profileSaving}>
+            {profileSaving ? 'Saving…' : 'Save profile'}
+          </button>
+        </form>
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
@@ -70,7 +98,7 @@ export default function Settings({ user, theme, setTheme, onLogout }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ fontWeight: 500, fontSize: 13 }}>Preferred appearance</div>
-              <div style={{ fontSize: 12, color: 'var(--text-3)' }}>Controls how the app looks when you're signed in</div>
+              <div style={{ fontSize: 12, color: 'var(--text-3)' }}>The topbar toggle also updates this preference</div>
             </div>
             <div style={{ display: 'flex', gap: 4, background: 'var(--bg-2)', padding: 3, borderRadius: 6 }}>
               {[['light', 'Light'], ['dark', 'Dark'], ['system', 'Same as system']].map(([k, l]) => (
@@ -99,18 +127,22 @@ export default function Settings({ user, theme, setTheme, onLogout }) {
           <div className="stack">
             <div>
               <label className="label">Current password</label>
-              <input className="input" type="password" required value={pwForm.current_password}
+              <input className="input" type="password" required autoComplete="current-password"
+                value={pwForm.current_password}
                 onChange={e => setPwForm(f => ({ ...f, current_password: e.target.value }))} />
             </div>
             <div className="grid-2">
               <div>
                 <label className="label">New password</label>
-                <input className="input" type="password" required value={pwForm.new_password}
+                <input className="input" type="password" required minLength={8} maxLength={72}
+                  autoComplete="new-password" value={pwForm.new_password}
                   onChange={e => setPwForm(f => ({ ...f, new_password: e.target.value }))} />
+                <div className="hint">At least 8 characters.</div>
               </div>
               <div>
                 <label className="label">Confirm new password</label>
-                <input className="input" type="password" required value={pwForm.confirm}
+                <input className="input" type="password" required minLength={8} maxLength={72}
+                  autoComplete="new-password" value={pwForm.confirm}
                   onChange={e => setPwForm(f => ({ ...f, confirm: e.target.value }))} />
               </div>
             </div>

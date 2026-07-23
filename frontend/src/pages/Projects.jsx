@@ -1,31 +1,85 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
-import { IcPlus, IcKey, IcCopy, IcTrash, IcX, IcChevRight, IcUsers, IcEdit, IcCheck, IcEye } from '../components/Icons.jsx'
+import { navigate } from '../router.js'
+import { IcPlus, IcKey, IcTrash, IcX, IcChevRight, IcUsers, IcEdit, IcCheck, IcEye } from '../components/Icons.jsx'
+import { fmtDate, useConfirm, CopyButton, LoadError } from '../components/ui.jsx'
 
-function fmtDate(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString()
+// Checkbox multi-select over known models, with a free-text line for
+// models the proxy hasn't seen yet. Empty selection = all models.
+function ModelSelect({ models, selected, onChange, custom, onCustomChange }) {
+  function toggle(name) {
+    onChange(selected.includes(name) ? selected.filter(m => m !== name) : [...selected, name])
+  }
+  return (
+    <div>
+      {models.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+          {models.map(m => (
+            <label key={m.name} className={`model-chip${selected.includes(m.name) ? ' on' : ''}`}>
+              <input type="checkbox" checked={selected.includes(m.name)} onChange={() => toggle(m.name)}
+                style={{ display: 'none' }} />
+              {m.name}
+            </label>
+          ))}
+        </div>
+      )}
+      <input className="input" value={custom} onChange={e => onCustomChange(e.target.value)}
+        placeholder={models.length ? 'Other models, comma-separated (optional)' : 'Comma-separated model names'} />
+      <div className="hint">Leave everything empty to allow all models.</div>
+    </div>
+  )
 }
 
-function KeyRow({ k, onRevoke, canManage, canReveal }) {
+function combineModels(selected, custom) {
+  const extra = custom.trim() ? custom.split(',').map(s => s.trim()).filter(Boolean) : []
+  const all = [...new Set([...selected, ...extra])]
+  return all.length ? all : null
+}
+
+function KeyRow({ k, models, onRevoke, onSaved, canManage, canReveal }) {
   const [revealed, setRevealed] = useState(null)
   const [revealing, setRevealing] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editName, setEditName] = useState(k.name)
+  const [editModels, setEditModels] = useState([])
+  const [editCustom, setEditCustom] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const restricted = k.allowed_models?.length && !k.allowed_models.includes('all')
+
+  function openEdit() {
+    const current = restricted ? k.allowed_models : []
+    const known = new Set(models.map(m => m.name))
+    setEditName(k.name)
+    setEditModels(current.filter(m => known.has(m)))
+    setEditCustom(current.filter(m => !known.has(m)).join(', '))
+    setError('')
+    setEditing(true)
+  }
+
+  async function saveEdit(e) {
+    e.preventDefault()
+    setSaving(true); setError('')
+    try {
+      await api.updateKey(k.id, { name: editName, allowed_models: combineModels(editModels, editCustom) })
+      setEditing(false)
+      await onSaved()
+    } catch (err) { setError(err.message) }
+    finally { setSaving(false) }
+  }
 
   async function reveal() {
     setRevealing(true)
+    setError('')
     try {
       const res = await api.revealKey(k.id)
       setRevealed(res.api_key)
     } catch (e) {
-      alert(e.message)
+      setError(e.message)
     } finally {
       setRevealing(false)
     }
-  }
-
-  function copy(text) {
-    navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) })
   }
 
   return (
@@ -35,7 +89,7 @@ function KeyRow({ k, onRevoke, canManage, canReveal }) {
           <div style={{ fontWeight: 500 }}>{k.name}</div>
           <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>
             Created {fmtDate(k.created_at)}
-            {k.allowed_models?.length ? ` · ${k.allowed_models.join(', ')}` : ' · all models'}
+            {restricted ? ` · ${k.allowed_models.join(', ')}` : ' · all models'}
           </div>
         </td>
         <td>
@@ -58,21 +112,52 @@ function KeyRow({ k, onRevoke, canManage, canReveal }) {
               </button>
             )}
             {k.active && canManage && (
-              <button className="btn sm danger" onClick={() => onRevoke(k.id)}>
+              <button className="iconbtn" title="Edit key" aria-label="Edit key" onClick={openEdit}>
+                <IcEdit size={13} />
+              </button>
+            )}
+            {k.active && canManage && (
+              <button className="btn sm danger" onClick={() => onRevoke(k)}>
                 <IcTrash size={12} /> Revoke
               </button>
             )}
           </div>
         </td>
       </tr>
+      {error && (
+        <tr><td colSpan={5} style={{ padding: '0 16px 12px' }}>
+          <div className="alert error" style={{ margin: 0 }}>{error}</div>
+        </td></tr>
+      )}
+      {editing && (
+        <tr>
+          <td colSpan={5} style={{ padding: '0 16px 14px' }}>
+            <form onSubmit={saveEdit} style={{ display: 'flex', flexDirection: 'column', gap: 10, background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 8, padding: 14 }}>
+              <div className="grid-2">
+                <div>
+                  <label className="label">Key name</label>
+                  <input className="input" value={editName} onChange={e => setEditName(e.target.value)} required />
+                </div>
+                <div>
+                  <label className="label">Allowed models</label>
+                  <ModelSelect models={models} selected={editModels} onChange={setEditModels}
+                    custom={editCustom} onCustomChange={setEditCustom} />
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button type="button" className="btn sm" onClick={() => setEditing(false)}>Cancel</button>
+                <button type="submit" className="btn sm primary" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+              </div>
+            </form>
+          </td>
+        </tr>
+      )}
       {revealed && (
         <tr>
           <td colSpan={5} style={{ padding: '0 16px 12px' }}>
             <div className="key-display">
               <span className="key-val">{revealed}</span>
-              <button className="btn sm" onClick={() => copy(revealed)}>
-                <IcCopy size={12} /> {copied ? 'Copied!' : 'Copy'}
-              </button>
+              <CopyButton text={revealed} />
               <button className="btn sm" onClick={() => setRevealed(null)}>
                 <IcX size={12} /> Hide
               </button>
@@ -86,15 +171,18 @@ function KeyRow({ k, onRevoke, canManage, canReveal }) {
 
 // ── Keys tab ──────────────────────────────────────────────
 function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
+  const confirm = useConfirm()
   const [keys, setKeys] = useState([])
+  const [models, setModels] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
+  const [showRevoked, setShowRevoked] = useState(false)
   const [newKeyName, setNewKeyName] = useState('')
-  const [newKeyModels, setNewKeyModels] = useState('')
+  const [newKeyModels, setNewKeyModels] = useState([])
+  const [newKeyCustom, setNewKeyCustom] = useState('')
   const [justCreated, setJustCreated] = useState(null)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
-  const [copied, setCopied] = useState(false)
 
   async function loadKeys() {
     if (!canSeeKeys) return
@@ -105,25 +193,29 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
   }
 
   useEffect(() => { loadKeys() }, [project.id, canSeeKeys])
+  useEffect(() => {
+    if (canManage) api.getModels().then(setModels).catch(() => {})
+  }, [canManage])
 
   async function createKey(e) {
     e.preventDefault()
     setCreating(true); setError('')
     try {
-      const allowed = newKeyModels.trim()
-        ? newKeyModels.split(',').map(s => s.trim()).filter(Boolean)
-        : null
-      const res = await api.createKey(project.id, { name: newKeyName, allowed_models: allowed })
+      const res = await api.createKey(project.id, { name: newKeyName, allowed_models: combineModels(newKeyModels, newKeyCustom) })
       setJustCreated(res.api_key)
-      setShowCreate(false); setNewKeyName(''); setNewKeyModels('')
+      setShowCreate(false); setNewKeyName(''); setNewKeyModels([]); setNewKeyCustom('')
       await loadKeys()
     } catch (e) { setError(e.message) }
     finally { setCreating(false) }
   }
 
-  async function revoke(keyId) {
-    if (!confirm('Revoke this key? This cannot be undone.')) return
-    try { await api.revokeKey(keyId); await loadKeys() }
+  async function revoke(key) {
+    const ok = await confirm(
+      `Revoke the API key "${key.name}" (${key.key_prefix}…)? Requests using it will start failing immediately. This cannot be undone.`,
+      { title: 'Revoke API key', confirmLabel: 'Revoke key', danger: true },
+    )
+    if (!ok) return
+    try { await api.revokeKey(key.id); await loadKeys() }
     catch (e) { setError(e.message) }
   }
 
@@ -137,6 +229,9 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
       </div>
     )
   }
+
+  const revokedCount = keys.filter(k => !k.active).length
+  const visibleKeys = showRevoked ? keys : keys.filter(k => k.active)
 
   return (
     <div>
@@ -159,12 +254,10 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
                 <div style={{ fontWeight: 600, fontSize: 14 }}>API key created</div>
                 <div className="key-display" style={{ marginTop: 8 }}>
                   <span className="key-val">{justCreated}</span>
-                  <button className="btn sm" onClick={() => { navigator.clipboard.writeText(justCreated); setCopied(true); setTimeout(() => setCopied(false), 1500) }}>
-                    <IcCopy size={12} /> {copied ? 'Copied!' : 'Copy'}
-                  </button>
+                  <CopyButton text={justCreated} />
                 </div>
               </div>
-              <button className="iconbtn" onClick={() => setJustCreated(null)}><IcX size={14} /></button>
+              <button className="iconbtn" aria-label="Dismiss" onClick={() => setJustCreated(null)}><IcX size={14} /></button>
             </div>
           </div>
         </div>
@@ -174,7 +267,7 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-h">
             <h3>Create API key</h3>
-            <button className="iconbtn" onClick={() => setShowCreate(false)}><IcX size={14} /></button>
+            <button className="iconbtn" aria-label="Close" onClick={() => setShowCreate(false)}><IcX size={14} /></button>
           </div>
           <form className="card-b" onSubmit={createKey}>
             <div className="grid-2" style={{ marginBottom: 14 }}>
@@ -184,8 +277,8 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
               </div>
               <div>
                 <label className="label">Allowed models</label>
-                <input className="input" value={newKeyModels} onChange={e => setNewKeyModels(e.target.value)} placeholder="Leave blank for all models" />
-                <div className="hint">Comma-separated, or blank for unrestricted.</div>
+                <ModelSelect models={models} selected={newKeyModels} onChange={setNewKeyModels}
+                  custom={newKeyCustom} onCustomChange={setNewKeyCustom} />
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -199,19 +292,32 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
       <div className="card">
         <div className="card-h">
           <h3>API Keys</h3>
-          <div style={{ fontSize: 12, color: 'var(--text-3)' }}>{keys.filter(k => k.active).length} active</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 12, color: 'var(--text-3)' }}>
+            <span>{keys.filter(k => k.active).length} active</span>
+            {revokedCount > 0 && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+                <input type="checkbox" checked={showRevoked} onChange={e => setShowRevoked(e.target.checked)} />
+                Show {revokedCount} revoked
+              </label>
+            )}
+          </div>
         </div>
         {loading ? (
           <div className="card-b" style={{ color: 'var(--text-3)' }}>Loading…</div>
-        ) : keys.length === 0 ? (
+        ) : visibleKeys.length === 0 ? (
           <div className="empty">
-            <div className="empty-title">No keys yet</div>
-            <div style={{ fontSize: 12 }}>Create your first API key to start making requests.</div>
+            <div className="empty-title">{keys.length === 0 ? 'No keys yet' : 'No active keys'}</div>
+            <div style={{ fontSize: 12 }}>
+              {keys.length === 0 ? 'Create your first API key to start making requests.' : 'All keys are revoked.'}
+            </div>
           </div>
         ) : (
           <table className="table">
             <thead><tr><th>Name</th><th>Prefix</th><th>Status</th><th>Last used</th><th></th></tr></thead>
-            <tbody>{keys.map(k => <KeyRow key={k.id} k={k} onRevoke={revoke} canManage={canManage} canReveal={canReveal} />)}</tbody>
+            <tbody>{visibleKeys.map(k => (
+              <KeyRow key={k.id} k={k} models={models} onRevoke={revoke} onSaved={loadKeys}
+                canManage={canManage} canReveal={canReveal} />
+            ))}</tbody>
           </table>
         )}
       </div>
@@ -220,9 +326,22 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
 }
 
 // ── Members tab ───────────────────────────────────────────
-const ROLES = ['admin', 'developer', 'viewer']
+const ROLES = [
+  { id: 'admin', hint: 'Manage members and keys, reveal key plaintext' },
+  { id: 'developer', hint: 'View and use project keys' },
+  { id: 'viewer', hint: 'See the project, no key access' },
+]
+
+function RoleSelect({ value, onChange, style }) {
+  return (
+    <select className="select" style={style} value={value} onChange={e => onChange(e.target.value)}>
+      {ROLES.map(r => <option key={r.id} value={r.id} title={r.hint}>{r.id} — {r.hint}</option>)}
+    </select>
+  )
+}
 
 function MembersTab({ project, members, allUsers, canManage, onReload }) {
+  const confirm = useConfirm()
   const [showAdd, setShowAdd] = useState(false)
   const [addUserId, setAddUserId] = useState('')
   const [addRole, setAddRole] = useState('developer')
@@ -231,15 +350,13 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
   const [editRole, setEditRole] = useState('')
   const [error, setError] = useState('')
 
-  async function load() { await onReload() }
-
   async function addMember(e) {
     e.preventDefault()
     setAdding(true); setError('')
     try {
       await api.addMember(project.id, { user_id: parseInt(addUserId), role: addRole })
       setShowAdd(false); setAddUserId(''); setAddRole('developer')
-      await load()
+      await onReload()
     } catch (e) { setError(e.message) }
     finally { setAdding(false) }
   }
@@ -248,13 +365,17 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
     try {
       await api.updateMemberRole(project.id, userId, editRole)
       setEditingId(null)
-      await load()
+      await onReload()
     } catch (e) { setError(e.message) }
   }
 
-  async function remove(userId) {
-    if (!confirm('Remove this member from the project?')) return
-    try { await api.removeMember(project.id, userId); await load() }
+  async function remove(member) {
+    const ok = await confirm(
+      `Remove ${member.username} from "${project.name}"? They will lose access to the project's keys and usage.`,
+      { title: 'Remove member', confirmLabel: 'Remove', danger: true },
+    )
+    if (!ok) return
+    try { await api.removeMember(project.id, member.user_id); await onReload() }
     catch (e) { setError(e.message) }
   }
 
@@ -275,7 +396,7 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-h">
             <h3>Add member</h3>
-            <button className="iconbtn" onClick={() => setShowAdd(false)}><IcX size={14} /></button>
+            <button className="iconbtn" aria-label="Close" onClick={() => setShowAdd(false)}><IcX size={14} /></button>
           </div>
           <form className="card-b" onSubmit={addMember}>
             <div className="grid-2" style={{ marginBottom: 14 }}>
@@ -291,9 +412,7 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
               </div>
               <div>
                 <label className="label">Role</label>
-                <select className="select" value={addRole} onChange={e => setAddRole(e.target.value)}>
-                  {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-                </select>
+                <RoleSelect value={addRole} onChange={setAddRole} />
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -324,23 +443,22 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
                   <td>
                     {canManage && editingId === m.user_id ? (
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                        <select className="select" style={{ width: 'auto' }} value={editRole} onChange={e => setEditRole(e.target.value)}>
-                          {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-                        </select>
-                        <button className="iconbtn" title="Save" onClick={() => saveRole(m.user_id)}><IcCheck size={13} /></button>
-                        <button className="iconbtn" title="Cancel" onClick={() => setEditingId(null)}><IcX size={13} /></button>
+                        <RoleSelect value={editRole} onChange={setEditRole} style={{ width: 'auto' }} />
+                        <button className="iconbtn" title="Save" aria-label="Save role" onClick={() => saveRole(m.user_id)}><IcCheck size={13} /></button>
+                        <button className="iconbtn" title="Cancel" aria-label="Cancel" onClick={() => setEditingId(null)}><IcX size={13} /></button>
                       </div>
                     ) : (
-                      <span className={`badge ${m.role === 'admin' ? 'accent' : ''}`}>{m.role}</span>
+                      <span className={`badge ${m.role === 'admin' ? 'accent' : ''}`}
+                        title={ROLES.find(r => r.id === m.role)?.hint}>{m.role}</span>
                     )}
                   </td>
                   {canManage && (
                     <td>
                       <div style={{ display: 'flex', gap: 4 }}>
-                        <button className="iconbtn" title="Edit role" onClick={() => { setEditingId(m.user_id); setEditRole(m.role) }}>
+                        <button className="iconbtn" title="Edit role" aria-label="Edit role" onClick={() => { setEditingId(m.user_id); setEditRole(m.role) }}>
                           <IcEdit size={13} />
                         </button>
-                        <button className="iconbtn" title="Remove" style={{ color: 'var(--red)' }} onClick={() => remove(m.user_id)}>
+                        <button className="iconbtn" title="Remove" aria-label="Remove member" style={{ color: 'var(--red)' }} onClick={() => remove(m)}>
                           <IcTrash size={13} />
                         </button>
                       </div>
@@ -357,21 +475,76 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
 }
 
 // ── Project detail with tabs ───────────────────────────────
-function ProjectDetail({ project, user, onBack }) {
-  const [tab, setTab] = useState('keys')
+function ProjectDetail({ projectId, user, tab }) {
+  const confirm = useConfirm()
+  const [project, setProject] = useState(null)
   const [members, setMembers] = useState([])
   const [allUsers, setAllUsers] = useState([])
-  const [membersLoading, setMembersLoading] = useState(true)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [editing, setEditing] = useState(false)
+  const [editName, setEditName] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [editError, setEditError] = useState('')
 
   async function loadData() {
-    setMembersLoading(true)
-    const [mr, ur] = await Promise.allSettled([api.getMembers(project.id), api.getUsers()])
-    if (mr.status === 'fulfilled') setMembers(mr.value)
-    if (ur.status === 'fulfilled') setAllUsers(ur.value)
-    setMembersLoading(false)
+    setLoading(true)
+    setLoadError('')
+    try {
+      const [p, mr, ur] = await Promise.allSettled([
+        api.getProject(projectId), api.getMembers(projectId), api.getUsers(),
+      ])
+      if (p.status === 'rejected') throw p.reason
+      setProject(p.value)
+      if (mr.status === 'fulfilled') setMembers(mr.value)
+      if (ur.status === 'fulfilled') setAllUsers(ur.value)
+    } catch (e) {
+      setLoadError(e.message)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  useEffect(() => { loadData() }, [project.id])
+  useEffect(() => { loadData() }, [projectId])
+
+  async function saveProject(e) {
+    e.preventDefault()
+    setSaving(true); setEditError('')
+    try {
+      const p = await api.updateProject(projectId, { name: editName, description: editDesc || null })
+      setProject(p)
+      setEditing(false)
+    } catch (err) { setEditError(err.message) }
+    finally { setSaving(false) }
+  }
+
+  async function toggleArchive() {
+    const archiving = !project.archived
+    const ok = await confirm(
+      archiving
+        ? `Archive "${project.name}"? Its API keys stop working and it is hidden from lists. Usage history is kept, and you can unarchive later.`
+        : `Unarchive "${project.name}"? Its API keys start working again.`,
+      { title: archiving ? 'Archive project' : 'Unarchive project', confirmLabel: archiving ? 'Archive' : 'Unarchive', danger: archiving },
+    )
+    if (!ok) return
+    try {
+      const p = await api.updateProject(projectId, { archived: archiving })
+      setProject(p)
+    } catch (err) { setEditError(err.message) }
+  }
+
+  if (loading) {
+    return <div className="content"><div style={{ color: 'var(--text-3)', padding: '40px 0' }}>Loading…</div></div>
+  }
+  if (loadError || !project) {
+    return (
+      <div className="content">
+        <LoadError message={loadError || 'Project not found'} onRetry={loadData} />
+        <button className="btn sm" onClick={() => navigate('projects')}>← Back to projects</button>
+      </div>
+    )
+  }
 
   const isGlobalAdmin = user?.global_role === 'admin'
   const myMembership = members.find(m => m.user_id === user?.id)
@@ -381,55 +554,94 @@ function ProjectDetail({ project, user, onBack }) {
   // Revealing key plaintext is admin-only on the backend; don't offer the button
   // to developers only for it to 403.
   const canReveal = myProjectRole === 'admin'
+  const activeTab = tab === 'members' ? 'members' : 'keys'
 
   return (
     <div className="content">
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-3)', marginBottom: 20 }}>
-        <button className="btn ghost sm" onClick={onBack} style={{ padding: '2px 6px' }}>Projects</button>
+        <button className="btn ghost sm" onClick={() => navigate('projects')} style={{ padding: '2px 6px' }}>Projects</button>
         <IcChevRight size={12} />
         <span style={{ color: 'var(--text)', fontWeight: 500 }}>{project.name}</span>
       </div>
 
       <div className="page-h">
         <div>
-          <h1 className="page-title">{project.name}</h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h1 className="page-title">{project.name}</h1>
+            {project.archived && <span className="badge amber">Archived</span>}
+          </div>
           {project.description && <div className="page-sub">{project.description}</div>}
           <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>Created {fmtDate(project.created_at)}</div>
         </div>
+        {canManage && (
+          <div className="h-actions">
+            <button className="btn sm" onClick={() => { setEditName(project.name); setEditDesc(project.description || ''); setEditError(''); setEditing(true) }}>
+              <IcEdit size={13} /> Edit
+            </button>
+            <button className={`btn sm${project.archived ? '' : ' danger'}`} onClick={toggleArchive}>
+              {project.archived ? 'Unarchive' : 'Archive'}
+            </button>
+          </div>
+        )}
       </div>
 
+      {editError && !editing && <div className="alert error">{editError}</div>}
+
+      {editing && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-h">
+            <h3>Edit project</h3>
+            <button className="iconbtn" aria-label="Close" onClick={() => setEditing(false)}><IcX size={14} /></button>
+          </div>
+          <form className="card-b" onSubmit={saveProject}>
+            {editError && <div className="alert error">{editError}</div>}
+            <div className="grid-2" style={{ marginBottom: 14 }}>
+              <div>
+                <label className="label">Name</label>
+                <input className="input" value={editName} onChange={e => setEditName(e.target.value)} required />
+              </div>
+              <div>
+                <label className="label">Description</label>
+                <input className="input" value={editDesc} onChange={e => setEditDesc(e.target.value)} placeholder="Optional" />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" className="btn" onClick={() => setEditing(false)}>Cancel</button>
+              <button type="submit" className="btn primary" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <div className="tabs">
-        <button className={`tab${tab === 'keys' ? ' active' : ''}`} onClick={() => setTab('keys')}>
+        <button className={`tab${activeTab === 'keys' ? ' active' : ''}`} onClick={() => navigate(`projects/${projectId}`)}>
           <IcKey size={13} style={{ marginRight: 5 }} />API Keys
         </button>
-        <button className={`tab${tab === 'members' ? ' active' : ''}`} onClick={() => setTab('members')}>
+        <button className={`tab${activeTab === 'members' ? ' active' : ''}`} onClick={() => navigate(`projects/${projectId}/members`)}>
           <IcUsers size={13} style={{ marginRight: 5 }} />Members
         </button>
       </div>
 
-      {tab === 'keys' && <KeysTab project={project} canSeeKeys={canSeeKeys} canManage={canManage} canReveal={canReveal} />}
-      {tab === 'members' && (
-        membersLoading ? (
-          <div style={{ color: 'var(--text-3)', padding: '40px 0' }}>Loading…</div>
-        ) : (
-          <MembersTab
-            project={project}
-            members={members}
-            allUsers={allUsers}
-            canManage={canManage}
-            onReload={loadData}
-          />
-        )
+      {activeTab === 'keys' && <KeysTab project={project} canSeeKeys={canSeeKeys} canManage={canManage} canReveal={canReveal} />}
+      {activeTab === 'members' && (
+        <MembersTab
+          project={project}
+          members={members}
+          allUsers={allUsers}
+          canManage={canManage}
+          onReload={loadData}
+        />
       )}
     </div>
   )
 }
 
-export default function Projects({ user }) {
+export default function Projects({ user, projectId = null, tab = null }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
-  const [selected, setSelected] = useState(null)
+  const [loadError, setLoadError] = useState('')
   const [showCreate, setShowCreate] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
   const [creating, setCreating] = useState(false)
@@ -439,20 +651,21 @@ export default function Projects({ user }) {
 
   async function loadProjects() {
     setLoading(true)
+    setLoadError('')
     try {
-      const data = await api.getProjects()
+      const data = await api.getProjects(showArchived ? { include_archived: 'true' } : undefined)
       setProjects(data)
     } catch (e) {
-      setError(e.message)
+      setLoadError(e.message)
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { loadProjects() }, [])
+  useEffect(() => { if (projectId == null) loadProjects() }, [projectId, showArchived])
 
-  if (selected) {
-    return <ProjectDetail project={selected} user={user} onBack={() => setSelected(null)} />
+  if (projectId != null) {
+    return <ProjectDetail projectId={projectId} user={user} tab={tab} />
   }
 
   async function createProject(e) {
@@ -479,20 +692,27 @@ export default function Projects({ user }) {
           <h1 className="page-title">Projects</h1>
           <div className="page-sub">Isolate keys and usage per workload</div>
         </div>
-        {isAdmin && (
-          <div className="h-actions">
+        <div className="h-actions">
+          {isAdmin && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+              Show archived
+            </label>
+          )}
+          {isAdmin && (
             <button className="btn primary" onClick={() => setShowCreate(true)}><IcPlus size={14} /> New project</button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {error && <div className="alert error">{error}</div>}
+      {loadError && <LoadError message={loadError} onRetry={loadProjects} />}
 
       {showCreate && (
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-h">
             <h3>Create project</h3>
-            <button className="iconbtn" onClick={() => setShowCreate(false)}><IcX size={14} /></button>
+            <button className="iconbtn" aria-label="Close" onClick={() => setShowCreate(false)}><IcX size={14} /></button>
           </div>
           <form className="card-b" onSubmit={createProject}>
             <div className="grid-2" style={{ marginBottom: 14 }}>
@@ -515,17 +735,20 @@ export default function Projects({ user }) {
 
       {loading ? (
         <div style={{ color: 'var(--text-3)', padding: '40px 0' }}>Loading…</div>
-      ) : projects.length === 0 ? (
+      ) : loadError ? null : projects.length === 0 ? (
         <div className="card">
           <div className="empty">
             <div className="empty-title">No projects</div>
-            <div style={{ fontSize: 12 }}>Projects isolate API keys and usage tracking.</div>
+            <div style={{ fontSize: 12 }}>
+              {isAdmin ? 'Projects isolate API keys and usage tracking.' : 'Ask an admin to add you to a project.'}
+            </div>
           </div>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 14 }}>
+        <div className="project-grid">
           {projects.map(p => (
-            <div key={p.id} className="card" style={{ padding: 18, cursor: 'pointer' }} onClick={() => setSelected(p)}>
+            <div key={p.id} className="card" style={{ padding: 18, cursor: 'pointer', opacity: p.archived ? 0.6 : 1 }}
+              onClick={() => navigate(`projects/${p.id}`)}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
                 <div style={{ width: 36, height: 36, borderRadius: 8, background: 'var(--bg-3)', display: 'grid', placeItems: 'center', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600, flexShrink: 0 }}>
                   {p.name.slice(0, 2).toUpperCase()}
@@ -533,12 +756,15 @@ export default function Projects({ user }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div style={{ fontSize: 15, fontWeight: 600 }}>{p.name}</div>
+                    {p.archived && <span className="badge amber" style={{ fontSize: 10 }}>archived</span>}
                   </div>
                   {p.description && (
                     <div style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 4 }}>{p.description}</div>
                   )}
-                  <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>
-                    Created {fmtDate(p.created_at)}
+                  <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8, display: 'flex', gap: 12 }}>
+                    <span>Created {fmtDate(p.created_at)}</span>
+                    {p.member_count != null && <span>{p.member_count} member{p.member_count === 1 ? '' : 's'}</span>}
+                    {p.key_count != null && <span>{p.key_count} active key{p.key_count === 1 ? '' : 's'}</span>}
                   </div>
                 </div>
                 <IcChevRight size={14} style={{ color: 'var(--text-3)', marginTop: 4 }} />

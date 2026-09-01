@@ -6,6 +6,13 @@ model_list:
       model: gemini-2.5-flash-lite
       project: gcp-project-id
       location: us-central1
+      # Opt in to logprobs / top_logprobs. Off by default because Vertex support is
+      # per-model: gemini-2.0/2.5-flash serve them, gemini-3.x reject them. Confirm
+      # the model serves logprobs before enabling.
+      # supports_logprobs: true
 
 general_settings:
   port: 4000
+  # Strip params the model doesn't support instead of returning 400.
+  # Same semantics as litellm's `litellm_settings: drop_params`.
+  # drop_params: false

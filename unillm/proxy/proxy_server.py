@@ -42,6 +42,11 @@ from unillm.types import (
 from unillm.llm.vertex_ai import VertexAIHandler
 from unillm.llm.vertex_ai_kms import VertexAIKMSHandler
 from unillm.llm.vllm import VLLMHandler
+from unillm.llm.params import (
+    UnsupportedParamsError,
+    enabled_optional_params,
+    resolve_optional_params,
+)
 
 
 # Model type constants
@@ -331,6 +336,55 @@ def _get_model_type(model_name: str) -> str:
     return params.get("model_type", MODEL_TYPE_VERTEX_AI)
 
 
+def _drop_params_enabled() -> bool:
+    """
+    Whether unsupported params are stripped instead of rejected.
+
+    Mirrors litellm's `litellm_settings: drop_params`. Off by default: answering a
+    logprobs request with a 200 that has no logprobs is worse than a 400, because
+    nothing in the response tells the caller their request was not honored.
+    """
+    return bool(general_settings.get("drop_params", False))
+
+
+def _resolve_optional_params(
+    handler: Any,
+    requested: Dict[str, Any],
+    *,
+    model: str,
+    backend_model: str,
+    model_type: str,
+    text: bool = False,
+) -> Dict[str, Any]:
+    """
+    Narrow client-requested optional params to what this model actually serves.
+
+    `requested` must contain only params the client explicitly set — passing a param
+    the caller never sent would make it fail on a default it never chose.
+    """
+    attr = "SUPPORTED_TEXT_PARAMS" if text else "SUPPORTED_CHAT_PARAMS"
+    return resolve_optional_params(
+        requested,
+        capable=getattr(handler, attr, frozenset()),
+        enabled=enabled_optional_params(_get_model_params(model), text=text),
+        model=backend_model,
+        provider=model_type,
+        drop_params=_drop_params_enabled(),
+    )
+
+
+def _client_unsupported_params_detail(model_alias: str, exc: UnsupportedParamsError) -> str:
+    """
+    The caller-facing half of an UnsupportedParamsError.
+
+    `exc.message` names the backend model and the config key that turns the param on —
+    operator detail that belongs in the request log, not in an API response. Clients
+    get their own alias and the params they asked for, the same way upstream errors are
+    sanitized before they leave the proxy.
+    """
+    return f"Model '{model_alias}' does not support parameters: {exc.params}"
+
+
 def _base_log_fields(request_id, auth, ip_address, backend_model, model_type, stream, labels=None) -> Dict[str, Any]:
     """Assemble the per-request log fields shared by streaming and non-streaming paths."""
     return {
@@ -513,6 +567,27 @@ async def chat_completions(
             **log_fields,
         )
 
+    # Only params the client actually asked for are candidates for rejection. An
+    # explicit `logprobs: false` is a request for *no* logprobs, so it must not fail
+    # against a model that doesn't serve them — and top_logprobs can't appear without
+    # a true logprobs (enforced in ChatCompletionRequest).
+    requested_optional = {}
+    if request_body.logprobs:
+        requested_optional["logprobs"] = request_body.logprobs
+        if request_body.top_logprobs is not None:
+            requested_optional["top_logprobs"] = request_body.top_logprobs
+    try:
+        optional_params = _resolve_optional_params(
+            handler, requested_optional,
+            model=model, backend_model=actual_model, model_type=model_type,
+        )
+    except UnsupportedParamsError as e:
+        _log(status_code=400, error_message=e.message)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_client_unsupported_params_detail(model, e),
+        )
+
     try:
         handler_kwargs = {
             "model": actual_model,
@@ -528,6 +603,7 @@ async def chat_completions(
             "stream": stream,
             "project": model_params.get("project"),
             "location": model_params.get("location"),
+            **optional_params,
         }
         if model_params.get("kms_key_name"):
             handler_kwargs["kms_key_name"] = model_params.get("kms_key_name")
@@ -615,6 +691,21 @@ async def completions(
             **log_fields,
         )
 
+    requested_optional = (
+        {"logprobs": request_body.logprobs} if request_body.logprobs is not None else {}
+    )
+    try:
+        optional_params = _resolve_optional_params(
+            handler, requested_optional,
+            model=model, backend_model=actual_model, model_type=model_type, text=True,
+        )
+    except UnsupportedParamsError as e:
+        _log(status_code=400, error_message=e.message)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_client_unsupported_params_detail(model, e),
+        )
+
     try:
         handler_kwargs = {
             "model": actual_model,
@@ -630,6 +721,7 @@ async def completions(
             "stream": stream,
             "project": model_params.get("project"),
             "location": model_params.get("location"),
+            **optional_params,
         }
         if model_params.get("kms_key_name"):
             handler_kwargs["kms_key_name"] = model_params.get("kms_key_name")

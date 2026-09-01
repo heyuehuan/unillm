@@ -1,13 +1,25 @@
 """
-Logprobs across the backends, and the negotiation in front of them.
-"""
+Covers logprobs support across the request path:
 
+- Param negotiation (unillm/llm/params.py): capability x config gating, drop_params
+- Request validation: top_logprobs requires logprobs
+- Per-backend translation both ways:
+    vLLM        — native OpenAI shape, passthrough
+    Vertex REST — logprobs/top_logprobs <-> responseLogprobs/logprobs, logprobsResult
+    Vertex KMS  — the same via the SDK's snake_case config and proto attributes
+- End-to-end through /v1/chat/completions: 400 when a model isn't configured for
+  logprobs, forwarded when it is, dropped when drop_params is set
+"""
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
+from unillm.db import crud
+from unillm.db.database import SessionLocal, engine, init_db
+from unillm.db.models import Base
 from unillm.llm.params import (
     UnsupportedParamsError,
     enabled_optional_params,
@@ -16,6 +28,8 @@ from unillm.llm.params import (
 from unillm.llm.vertex_ai import VertexAIHandler
 from unillm.llm.vertex_ai_kms import VertexAIKMSHandler
 from unillm.llm.vllm import VLLMHandler
+from unillm.proxy.api_routes import hash_password
+from unillm.proxy.proxy_server import app
 from unillm.types import ChatCompletionRequest
 
 
@@ -328,3 +342,156 @@ def test_kms_treats_unset_proto_as_no_logprobs():
     assert VertexAIKMSHandler()._convert_logprobs(
         SimpleNamespace(chosen_candidates=[], top_candidates=[])
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# End-to-end through the proxy
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module", autouse=True)
+def db_setup():
+    init_db()
+    yield
+    Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture(scope="module")
+def api_key(client):
+    db = SessionLocal()
+    try:
+        crud.create_user(db=db, username="lpadmin",
+                         hashed_password=hash_password("adminpass"), global_role="admin")
+    finally:
+        db.close()
+    r = client.post("/api/auth/login", json={"username": "lpadmin", "password": "adminpass"})
+    token = r.json()["access_token"]
+    r = client.post("/api/projects", json={"name": "lp"},
+                    headers={"Authorization": f"Bearer {token}"})
+    project_id = r.json()["id"]
+    r = client.post(f"/api/projects/{project_id}/keys",
+                    json={"name": "lp-key", "allowed_models": ["all"]},
+                    headers={"Authorization": f"Bearer {token}"})
+    return r.json()["api_key"]
+
+
+@pytest.fixture
+def stub_backend(monkeypatch):
+    """
+    Configure two models — one opted into logprobs, one not — and capture the kwargs
+    the handler receives so we can assert on what actually reached the backend.
+    """
+    import unillm.proxy.proxy_server as ps
+
+    response = MagicMock()
+    response.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+    response.model_dump = lambda: {"id": "x", "object": "chat.completion", "choices": []}
+
+    handler = MagicMock()
+    handler.SUPPORTED_CHAT_PARAMS = frozenset({"logprobs", "top_logprobs"})
+    handler.SUPPORTED_TEXT_PARAMS = frozenset()
+    handler.chat_completion = AsyncMock(return_value=response)
+    handler.text_completion = AsyncMock(return_value=response)
+
+    monkeypatch.setattr(ps, "_get_handler_for_model", lambda m: handler)
+    monkeypatch.setattr(ps.proxy_config, "model_list", [
+        {"model_name": "lp-on", "unillm_params": {
+            "model": "gemini-2.5-flash", "supports_logprobs": True}},
+        {"model_name": "lp-off", "unillm_params": {"model": "gemini-3-flash"}},
+    ])
+    monkeypatch.setattr(ps, "general_settings", {})
+    return handler
+
+
+def _post(client, api_key, model, **body):
+    return client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}], **body},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+
+
+def test_logprobs_forwarded_when_model_opts_in(client, api_key, stub_backend):
+    r = _post(client, api_key, "lp-on", logprobs=True, top_logprobs=3)
+    assert r.status_code == 200
+    kwargs = stub_backend.chat_completion.call_args.kwargs
+    assert kwargs["logprobs"] is True
+    assert kwargs["top_logprobs"] == 3
+
+
+def test_logprobs_rejected_when_model_does_not_opt_in(client, api_key, stub_backend):
+    r = _post(client, api_key, "lp-off", logprobs=True)
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "lp-off" in detail and "logprobs" in detail
+    stub_backend.chat_completion.assert_not_called()
+
+
+def test_rejection_does_not_leak_backend_model_or_config_key(client, api_key, stub_backend):
+    """Operator detail (backend model, config flag) belongs in the log, not the response."""
+    r = _post(client, api_key, "lp-off", logprobs=True)
+    detail = r.json()["detail"]
+    assert "supports_logprobs" not in detail
+    assert "gemini-3-flash" not in detail
+
+
+def test_request_without_logprobs_unaffected_on_unconfigured_model(client, api_key, stub_backend):
+    """The gate must only fire on params the caller actually asked for."""
+    r = _post(client, api_key, "lp-off")
+    assert r.status_code == 200
+    assert "logprobs" not in stub_backend.chat_completion.call_args.kwargs
+
+
+def test_explicit_logprobs_false_is_not_a_request_for_logprobs(client, api_key, stub_backend):
+    """`logprobs: false` asks for none — failing it against an opted-out model is wrong."""
+    r = _post(client, api_key, "lp-off", logprobs=False)
+    assert r.status_code == 200
+    assert "logprobs" not in stub_backend.chat_completion.call_args.kwargs
+
+
+def test_drop_params_completes_the_request_without_logprobs(client, api_key, stub_backend, monkeypatch):
+    import unillm.proxy.proxy_server as ps
+    monkeypatch.setattr(ps, "general_settings", {"drop_params": True})
+
+    r = _post(client, api_key, "lp-off", logprobs=True)
+    assert r.status_code == 200
+    assert "logprobs" not in stub_backend.chat_completion.call_args.kwargs
+
+
+def _post_text(client, api_key, model, **body):
+    return client.post(
+        "/v1/completions",
+        json={"model": model, "prompt": "hi", **body},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+
+
+def test_text_logprobs_rejected_when_backend_cannot_serve_them(client, api_key, stub_backend):
+    """The model opts in, but a Gemini-backed handler has no legacy shape to fill."""
+    r = _post_text(client, api_key, "lp-on", logprobs=3)
+    assert r.status_code == 400
+    stub_backend.text_completion.assert_not_called()
+
+
+def test_text_logprobs_zero_is_still_a_request(client, api_key, stub_backend):
+    """Unlike the chat bool, `logprobs: 0` on legacy completions is an explicit ask."""
+    r = _post_text(client, api_key, "lp-on", logprobs=0)
+    assert r.status_code == 400
+
+
+def test_text_request_without_logprobs_is_unaffected(client, api_key, stub_backend):
+    r = _post_text(client, api_key, "lp-on")
+    assert r.status_code == 200
+    assert "logprobs" not in stub_backend.text_completion.call_args.kwargs
+
+
+def test_text_logprobs_forwarded_when_backend_and_config_allow(client, api_key, stub_backend):
+    stub_backend.SUPPORTED_TEXT_PARAMS = frozenset({"logprobs"})
+    r = _post_text(client, api_key, "lp-on", logprobs=3)
+    assert r.status_code == 200
+    assert stub_backend.text_completion.call_args.kwargs["logprobs"] == 3

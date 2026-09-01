@@ -390,6 +390,19 @@ def list_project_members(db: Session, project_id: int):
     )
 
 
+def list_member_candidates(db: Session, project_id: int) -> List[User]:
+    """Active users who are not yet members of the project — the "add member" pick list."""
+    member_ids = db.query(UserProjectAccess.user_id).filter(
+        UserProjectAccess.project_id == project_id,
+    )
+    return (
+        db.query(User)
+        .filter(User.active == True, User.id.notin_(member_ids))  # noqa: E712
+        .order_by(User.username)
+        .all()
+    )
+
+
 def update_member_role(db: Session, project_id: int, user_id: int, role: str) -> Optional[UserProjectAccess]:
     access = db.query(UserProjectAccess).filter(
         UserProjectAccess.project_id == project_id,

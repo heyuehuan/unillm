@@ -606,6 +606,15 @@ class ProjectMemberResponse(BaseModel):
     username: str
     email: Optional[str]
     role: str
+    # Disabled accounts keep their membership; the UI flags them rather than
+    # showing them as ordinary members.
+    active: bool = True
+
+
+class MemberCandidateResponse(BaseModel):
+    id: int
+    username: str
+    email: Optional[str]
 
 
 class AddMemberRequest(BaseModel):
@@ -619,7 +628,8 @@ class UpdateMemberRoleRequest(BaseModel):
 
 def _member_response(access, user) -> ProjectMemberResponse:
     return ProjectMemberResponse(
-        user_id=user.id, username=user.username, email=user.email, role=access.role
+        user_id=user.id, username=user.username, email=user.email,
+        role=access.role, active=user.active,
     )
 
 
@@ -641,6 +651,25 @@ def list_members(
     return [_member_response(a, u) for a, u in crud.list_project_members(db, project_id)]
 
 
+@router.get("/projects/{project_id}/member-candidates", response_model=List[MemberCandidateResponse])
+def list_member_candidates(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Users who can still be added to this project.
+
+    Project admins need this list to add members, but GET /users is global-admin
+    only — without its own endpoint the add-member form is empty for them.
+    """
+    _require_project_admin(db, current_user, project_id)
+    if not crud.get_project_by_id(db, project_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return [MemberCandidateResponse(id=u.id, username=u.username, email=u.email)
+            for u in crud.list_member_candidates(db, project_id)]
+
+
 @router.post("/projects/{project_id}/members", response_model=ProjectMemberResponse, status_code=201)
 def add_member(
     project_id: int,
@@ -656,9 +685,12 @@ def add_member(
     existing = crud.get_user_project_role(db, req.user_id, project_id)
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already a member")
-    target = crud.get_user_by_id(db, req.user_id)
+    target = crud.get_user_by_id_any(db, req.user_id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if not target.active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"'{target.username}' is disabled — re-enable the account before adding it")
     try:
         access = crud.add_user_to_project(db, user_id=req.user_id, project_id=project_id, role=req.role)
     except IntegrityError:
@@ -684,7 +716,10 @@ def update_member_role(
     access = crud.update_member_role(db, project_id=project_id, user_id=user_id, role=req.role)
     if not access:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
-    target = crud.get_user_by_id(db, user_id)
+    # get_user_by_id_any: the member may be a disabled account, and the role
+    # change has already been committed — looking it up as active-only left the
+    # response building against None (500) with the change silently applied.
+    target = crud.get_user_by_id_any(db, user_id)
     _audit(background_tasks, db, "project_member_role_updated", request, user=current_user,
            resource_type="project", resource_id=str(project_id),
            detail={"user_id": user_id, "role": req.role})

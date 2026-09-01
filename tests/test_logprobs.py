@@ -3,6 +3,7 @@ Logprobs across the backends, and the negotiation in front of them.
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from unillm.llm.params import (
     resolve_optional_params,
 )
 from unillm.llm.vertex_ai import VertexAIHandler
+from unillm.llm.vertex_ai_kms import VertexAIKMSHandler
 from unillm.llm.vllm import VLLMHandler
 from unillm.types import ChatCompletionRequest
 
@@ -288,3 +290,41 @@ def test_vertex_stream_chunk_omits_logprobs_when_absent():
         {"candidates": [{"content": {"parts": [{"text": "Hi"}]}}]}, model="m"
     )
     assert "logprobs" not in chunk["choices"][0]
+
+
+# ---------------------------------------------------------------------------
+# Vertex KMS: same mapping through the SDK
+# ---------------------------------------------------------------------------
+
+def test_kms_uses_snake_case_generation_config():
+    config = VertexAIKMSHandler()._build_generation_config(logprobs=True, top_logprobs=4)
+    assert config["response_logprobs"] is True
+    assert config["logprobs"] == 4
+
+
+def test_kms_omits_topk_when_top_logprobs_is_zero():
+    config = VertexAIKMSHandler()._build_generation_config(logprobs=True, top_logprobs=0)
+    assert config["response_logprobs"] is True
+    assert "logprobs" not in config
+
+
+def test_kms_converts_proto_logprobs():
+    """The SDK exposes attributes, not dict keys, and uses log_probability."""
+    logprobs_result = SimpleNamespace(
+        chosen_candidates=[SimpleNamespace(token="Hello", log_probability=-0.1)],
+        top_candidates=[SimpleNamespace(candidates=[
+            SimpleNamespace(token="Hello", log_probability=-0.1),
+            SimpleNamespace(token="Hi", log_probability=-2.0),
+        ])],
+    )
+    lp = VertexAIKMSHandler()._convert_logprobs(logprobs_result)
+    assert lp.content[0].token == "Hello"
+    assert [a.token for a in lp.content[0].top_logprobs] == ["Hello", "Hi"]
+
+
+def test_kms_treats_unset_proto_as_no_logprobs():
+    """Unset protos read as empty rather than None; both mean 'not requested'."""
+    assert VertexAIKMSHandler()._convert_logprobs(None) is None
+    assert VertexAIKMSHandler()._convert_logprobs(
+        SimpleNamespace(chosen_candidates=[], top_candidates=[])
+    ) is None

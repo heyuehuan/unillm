@@ -35,12 +35,16 @@ import vertexai
 from vertexai.generative_models import GenerativeModel, Content, Part
 
 from unillm._logging import verbose_proxy_logger
+from unillm.llm.params import CHAT_LOGPROB_PARAMS
 from unillm.types import (
     ChatCompletionResponse,
+    ChatCompletionTokenLogprob,
     Choice,
+    ChoiceLogprobs,
     CompletionResponse,
     Message,
     TextChoice,
+    TopLogprob,
     Usage,
 )
 
@@ -89,6 +93,14 @@ class VertexAIKMSHandler:
     Uses vertexai.init() with encryption_spec_key_name to configure CMEK
     at the SDK level for all supported operations.
     """
+
+    # Same Gemini capability as the REST handler, reached through the SDK's
+    # snake_case generation config. Per-model availability is a config question —
+    # see unillm/llm/params.py.
+    SUPPORTED_CHAT_PARAMS = frozenset(CHAT_LOGPROB_PARAMS)
+    # text_completion here is a chat call reshaped into the legacy format, which has
+    # no place to carry per-token logprobs faithfully.
+    SUPPORTED_TEXT_PARAMS = frozenset()
 
     def __init__(
         self,
@@ -192,6 +204,8 @@ class VertexAIKMSHandler:
         n: Optional[int] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        logprobs: Optional[bool] = None,
+        top_logprobs: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Build Vertex AI generation config from OpenAI parameters"""
         config = {}
@@ -215,8 +229,50 @@ class VertexAIKMSHandler:
             config["presence_penalty"] = presence_penalty
         if frequency_penalty is not None:
             config["frequency_penalty"] = frequency_penalty
+        # Same two-field split as the REST API, in the SDK's snake_case spelling:
+        # response_logprobs is the on/off bool, logprobs the top-k count.
+        if logprobs is not None:
+            config["response_logprobs"] = logprobs
+        # Same 1-based top-k as the REST API: top_logprobs=0 asks for no alternatives,
+        # which Vertex expresses as an absent field, not logprobs=0.
+        if logprobs and top_logprobs:
+            config["logprobs"] = top_logprobs
 
         return config
+
+    @staticmethod
+    def _convert_logprobs(logprobs_result: Any) -> Optional[ChoiceLogprobs]:
+        """
+        Convert the SDK's logprobs_result into OpenAI's ChoiceLogprobs.
+
+        Same zip-by-position mapping as the REST handler, but reading proto attributes
+        instead of dict keys. The field is absent entirely on responses that did not
+        request logprobs, and unset protos read as empty rather than None, so both are
+        treated as "no logprobs".
+        """
+        if logprobs_result is None:
+            return None
+        chosen = getattr(logprobs_result, "chosen_candidates", None)
+        if not chosen:
+            return None
+
+        top_candidates = getattr(logprobs_result, "top_candidates", None) or []
+        content = []
+        for index, candidate in enumerate(chosen):
+            alternatives = []
+            if index < len(top_candidates):
+                for alt in getattr(top_candidates[index], "candidates", None) or []:
+                    alternatives.append(TopLogprob(
+                        token=getattr(alt, "token", ""),
+                        logprob=getattr(alt, "log_probability", 0.0),
+                    ))
+            content.append(ChatCompletionTokenLogprob(
+                token=getattr(candidate, "token", ""),
+                logprob=getattr(candidate, "log_probability", 0.0),
+                top_logprobs=alternatives,
+            ))
+
+        return ChoiceLogprobs(content=content)
 
     def _convert_response_to_openai(
         self, response: Any, model: str
@@ -247,7 +303,8 @@ class VertexAIKMSHandler:
                     role="assistant",
                     content="".join(text_parts) if text_parts else None
                 ),
-                finish_reason=finish_reason
+                finish_reason=finish_reason,
+                logprobs=self._convert_logprobs(getattr(candidate, "logprobs_result", None)),
             ))
 
         usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
@@ -282,6 +339,8 @@ class VertexAIKMSHandler:
         project: Optional[str] = None,
         location: Optional[str] = None,
         kms_key_name: Optional[str] = None,
+        logprobs: Optional[bool] = None,
+        top_logprobs: Optional[int] = None,
         **kwargs,
     ) -> Union[ChatCompletionResponse, AsyncIterator[str]]:
         """
@@ -302,6 +361,8 @@ class VertexAIKMSHandler:
             n=n,
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
+            logprobs=logprobs,
+            top_logprobs=top_logprobs,
         )
 
         verbose_proxy_logger.debug(f"Vertex AI KMS request for model: {model}")
@@ -380,19 +441,29 @@ class VertexAIKMSHandler:
                     last_usage_metadata = chunk.usage_metadata
                 if chunk.candidates:
                     for candidate in chunk.candidates:
+                        # Logprobs arrive once per candidate, but a candidate can span
+                        # several parts. Attach them to the first chunk emitted for
+                        # this candidate so they aren't repeated for every part.
+                        pending_logprobs = self._convert_logprobs(
+                            getattr(candidate, "logprobs_result", None)
+                        )
                         if candidate.content and candidate.content.parts:
                             for part in candidate.content.parts:
                                 if hasattr(part, 'text') and part.text:
+                                    choice: Dict[str, Any] = {
+                                        "index": 0,
+                                        "delta": {"content": part.text},
+                                        "finish_reason": None,
+                                    }
+                                    if pending_logprobs is not None:
+                                        choice["logprobs"] = pending_logprobs.model_dump()
+                                        pending_logprobs = None
                                     openai_chunk = {
                                         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
                                         "object": "chat.completion.chunk",
                                         "created": int(time.time()),
                                         "model": model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": {"content": part.text},
-                                            "finish_reason": None,
-                                        }],
+                                        "choices": [choice],
                                     }
                                     yield f"data: {json.dumps(openai_chunk)}\n\n"
         finally:

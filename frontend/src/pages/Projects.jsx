@@ -692,7 +692,8 @@ export default function Projects({ user, projectId = null, tab = null }) {
     setError('')
     try {
       const p = await api.createProject({ name: newName, description: newDesc || null })
-      setProjects(prev => [...prev, p])
+      // The list is newest-first, so a new project belongs at the top.
+      setProjects(prev => [p, ...prev])
       setShowCreate(false)
       setNewName('')
       setNewDesc('')
@@ -711,12 +712,12 @@ export default function Projects({ user, projectId = null, tab = null }) {
           <div className="page-sub">Isolate keys and usage per workload</div>
         </div>
         <div className="h-actions">
-          {isAdmin && (
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>
-              <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
-              Show archived
-            </label>
-          )}
+          {/* Not admin-only: the list is scoped per user either way, and a member
+              otherwise has no way to see a project after it is archived. */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+            Show archived
+          </label>
           {isAdmin && (
             <button className="btn primary" onClick={() => setShowCreate(true)}><IcPlus size={14} /> New project</button>
           )}

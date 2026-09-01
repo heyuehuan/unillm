@@ -19,7 +19,9 @@ dependencies = [
     # Vertex AI
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0",
-    "google-cloud-aiplatform>=1.47.0",
+    # 1.71 is the first release whose vertexai GenerationConfig accepts
+    # response_logprobs / logprobs (needed by the KMS handler).
+    "google-cloud-aiplatform>=1.71.0",
     # SSH signature verification
     "cryptography>=41.0.0",
     # Database

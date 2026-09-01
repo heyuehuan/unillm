@@ -12,6 +12,7 @@ from unillm.llm.params import (
     enabled_optional_params,
     resolve_optional_params,
 )
+from unillm.llm.vertex_ai import VertexAIHandler
 from unillm.llm.vllm import VLLMHandler
 from unillm.types import ChatCompletionRequest
 
@@ -177,3 +178,113 @@ def test_vllm_response_without_logprobs_stays_none():
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}],
     })
     assert parsed.choices[0].logprobs is None
+
+
+# ---------------------------------------------------------------------------
+# Vertex REST: name collision on "logprobs" between the two APIs
+# ---------------------------------------------------------------------------
+
+def test_vertex_maps_to_gemini_generation_config():
+    """OpenAI's bool logprobs -> responseLogprobs; int top_logprobs -> logprobs."""
+    config = VertexAIHandler()._build_generation_config(logprobs=True, top_logprobs=5)
+    assert config["responseLogprobs"] is True
+    assert config["logprobs"] == 5
+
+
+def test_vertex_omits_topk_when_logprobs_off():
+    config = VertexAIHandler()._build_generation_config(logprobs=False, top_logprobs=5)
+    assert config["responseLogprobs"] is False
+    assert "logprobs" not in config
+
+
+def test_vertex_omits_topk_when_top_logprobs_is_zero():
+    """OpenAI's top_logprobs=0 means 'no alternatives'; Gemini's count starts at 1."""
+    config = VertexAIHandler()._build_generation_config(logprobs=True, top_logprobs=0)
+    assert config["responseLogprobs"] is True
+    assert "logprobs" not in config
+
+
+def test_vertex_converts_logprobs_result():
+    """Gemini's two parallel lists zip by position into OpenAI's nested shape."""
+    lp = VertexAIHandler()._convert_logprobs({
+        "chosenCandidates": [
+            {"token": "Hello", "logProbability": -0.1},
+            {"token": " world", "logProbability": -0.4},
+        ],
+        "topCandidates": [
+            {"candidates": [
+                {"token": "Hello", "logProbability": -0.1},
+                {"token": "Hi", "logProbability": -2.0},
+            ]},
+            {"candidates": [{"token": " world", "logProbability": -0.4}]},
+        ],
+    })
+    assert [t.token for t in lp.content] == ["Hello", " world"]
+    assert lp.content[0].logprob == -0.1
+    assert [a.token for a in lp.content[0].top_logprobs] == ["Hello", "Hi"]
+    assert len(lp.content[1].top_logprobs) == 1
+
+
+def test_vertex_handles_chosen_without_top_candidates():
+    """logprobs=true without a top-k count returns chosen tokens only."""
+    lp = VertexAIHandler()._convert_logprobs({
+        "chosenCandidates": [{"token": "a", "logProbability": -0.5}]
+    })
+    assert lp.content[0].token == "a"
+    assert lp.content[0].top_logprobs == []
+
+
+def test_vertex_tolerates_short_top_candidates():
+    """topCandidates shorter than chosenCandidates must not IndexError."""
+    lp = VertexAIHandler()._convert_logprobs({
+        "chosenCandidates": [
+            {"token": "a", "logProbability": -0.1},
+            {"token": "b", "logProbability": -0.2},
+        ],
+        "topCandidates": [{"candidates": [{"token": "a", "logProbability": -0.1}]}],
+    })
+    assert len(lp.content) == 2
+    assert lp.content[1].top_logprobs == []
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"avgLogprobs": -0.3}])
+def test_vertex_returns_none_without_per_token_data(payload):
+    """avgLogprobs is always present and is not per-token data — not mapped."""
+    assert VertexAIHandler()._convert_logprobs(payload) is None
+
+
+def test_vertex_response_carries_logprobs_onto_the_choice():
+    resp = VertexAIHandler()._convert_gemini_response_to_openai({
+        "candidates": [{
+            "content": {"parts": [{"text": "Hello"}]},
+            "finishReason": "STOP",
+            "logprobsResult": {
+                "chosenCandidates": [{"token": "Hello", "logProbability": -0.1}]
+            },
+        }],
+        "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+    }, model="gemini-2.5-flash")
+    assert resp.choices[0].logprobs.content[0].token == "Hello"
+
+
+def test_vertex_stream_chunk_puts_logprobs_beside_delta():
+    """OpenAI streaming carries logprobs at choice level, not inside delta."""
+    chunk = VertexAIHandler()._convert_stream_chunk({
+        "candidates": [{
+            "content": {"parts": [{"text": "Hi"}]},
+            "logprobsResult": {
+                "chosenCandidates": [{"token": "Hi", "logProbability": -0.2}]
+            },
+        }]
+    }, model="gemini-2.5-flash")
+    choice = chunk["choices"][0]
+    assert choice["delta"] == {"content": "Hi"}
+    assert choice["logprobs"]["content"][0]["token"] == "Hi"
+    assert "logprobs" not in choice["delta"]
+
+
+def test_vertex_stream_chunk_omits_logprobs_when_absent():
+    chunk = VertexAIHandler()._convert_stream_chunk(
+        {"candidates": [{"content": {"parts": [{"text": "Hi"}]}}]}, model="m"
+    )
+    assert "logprobs" not in chunk["choices"][0]

@@ -340,7 +340,7 @@ function RoleSelect({ value, onChange, style }) {
   )
 }
 
-function MembersTab({ project, members, allUsers, canManage, onReload }) {
+function MembersTab({ project, members, canManage, onReload }) {
   const confirm = useConfirm()
   const [showAdd, setShowAdd] = useState(false)
   const [addUserId, setAddUserId] = useState('')
@@ -349,6 +349,19 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
   const [editingId, setEditingId] = useState(null)
   const [editRole, setEditRole] = useState('')
   const [error, setError] = useState('')
+  // Addable users come from the project's own endpoint (not GET /users, which is
+  // global-admin only) and are loaded when the form opens, so the list is fresh.
+  const [candidates, setCandidates] = useState([])
+  const [candidatesLoading, setCandidatesLoading] = useState(false)
+  const [candidatesError, setCandidatesError] = useState('')
+
+  async function openAdd() {
+    setShowAdd(true); setAddUserId(''); setAddRole('developer')
+    setCandidatesLoading(true); setCandidatesError('')
+    try { setCandidates(await api.getMemberCandidates(project.id)) }
+    catch (e) { setCandidatesError(e.message) }
+    finally { setCandidatesLoading(false) }
+  }
 
   async function addMember(e) {
     e.preventDefault()
@@ -379,14 +392,11 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
     catch (e) { setError(e.message) }
   }
 
-  const memberUserIds = new Set(members.map(m => m.user_id))
-  const addableUsers = allUsers.filter(u => !memberUserIds.has(u.id))
-
   return (
     <div>
       {canManage && (
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }}>
-          <button className="btn primary sm" onClick={() => setShowAdd(true)}><IcPlus size={13} /> Add member</button>
+          <button className="btn primary sm" onClick={openAdd}><IcPlus size={13} /> Add member</button>
         </div>
       )}
 
@@ -402,13 +412,18 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
             <div className="grid-2" style={{ marginBottom: 14 }}>
               <div>
                 <label className="label">User</label>
-                <select className="select" required value={addUserId} onChange={e => setAddUserId(e.target.value)}>
-                  <option value="">Select a user…</option>
-                  {addableUsers.map(u => (
+                <select className="select" required value={addUserId} disabled={candidatesLoading || !!candidatesError}
+                  onChange={e => setAddUserId(e.target.value)}>
+                  <option value="">{candidatesLoading ? 'Loading users…' : 'Select a user…'}</option>
+                  {candidates.map(u => (
                     <option key={u.id} value={u.id}>{u.username}{u.email ? ` (${u.email})` : ''}</option>
                   ))}
                 </select>
-                {addableUsers.length === 0 && <div className="hint">All users are already members.</div>}
+                {candidatesError ? (
+                  <div className="hint" style={{ color: 'var(--red)' }}>Could not load users: {candidatesError}</div>
+                ) : !candidatesLoading && candidates.length === 0 ? (
+                  <div className="hint">Every active user is already a member.</div>
+                ) : null}
               </div>
               <div>
                 <label className="label">Role</label>
@@ -417,7 +432,7 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button type="button" className="btn" onClick={() => setShowAdd(false)}>Cancel</button>
-              <button type="submit" className="btn primary" disabled={adding}>{adding ? 'Adding…' : 'Add member'}</button>
+              <button type="submit" className="btn primary" disabled={adding || candidatesLoading}>{adding ? 'Adding…' : 'Add member'}</button>
             </div>
           </form>
         </div>
@@ -438,7 +453,12 @@ function MembersTab({ project, members, allUsers, canManage, onReload }) {
             <tbody>
               {members.map(m => (
                 <tr key={m.user_id} className="row-hover">
-                  <td><span className="mono" style={{ fontWeight: 500 }}>{m.username}</span></td>
+                  <td>
+                    <span className="mono" style={{ fontWeight: 500 }}>{m.username}</span>
+                    {m.active === false && (
+                      <span className="badge red" style={{ fontSize: 10, marginLeft: 6 }}>disabled</span>
+                    )}
+                  </td>
                   <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{m.email || '—'}</td>
                   <td>
                     {canManage && editingId === m.user_id ? (
@@ -479,7 +499,6 @@ function ProjectDetail({ projectId, user, tab }) {
   const confirm = useConfirm()
   const [project, setProject] = useState(null)
   const [members, setMembers] = useState([])
-  const [allUsers, setAllUsers] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [editing, setEditing] = useState(false)
@@ -492,13 +511,13 @@ function ProjectDetail({ projectId, user, tab }) {
     setLoading(true)
     setLoadError('')
     try {
-      const [p, mr, ur] = await Promise.allSettled([
-        api.getProject(projectId), api.getMembers(projectId), api.getUsers(),
+      // Both are required: the caller's project role is derived from the member
+      // list, so swallowing a failure here would silently render them a viewer.
+      const [p, ms] = await Promise.all([
+        api.getProject(projectId), api.getMembers(projectId),
       ])
-      if (p.status === 'rejected') throw p.reason
-      setProject(p.value)
-      if (mr.status === 'fulfilled') setMembers(mr.value)
-      if (ur.status === 'fulfilled') setAllUsers(ur.value)
+      setProject(p)
+      setMembers(ms)
     } catch (e) {
       setLoadError(e.message)
     } finally {
@@ -627,7 +646,6 @@ function ProjectDetail({ projectId, user, tab }) {
         <MembersTab
           project={project}
           members={members}
-          allUsers={allUsers}
           canManage={canManage}
           onReload={loadData}
         />

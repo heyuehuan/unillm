@@ -60,6 +60,9 @@ export const api = {
   updateProject: (id, data) => req('PUT', `/api/projects/${id}`, data),
 
   getMembers: (projectId) => req('GET', `/api/projects/${projectId}/members`),
+  // Users still addable to a project. Separate from getUsers() because project
+  // admins may manage members without being global admins.
+  getMemberCandidates: (projectId) => req('GET', `/api/projects/${projectId}/member-candidates`),
   addMember: (projectId, data) => req('POST', `/api/projects/${projectId}/members`, data),
   updateMemberRole: (projectId, userId, role) => req('PUT', `/api/projects/${projectId}/members/${userId}`, { role }),
   removeMember: (projectId, userId) => req('DELETE', `/api/projects/${projectId}/members/${userId}`),

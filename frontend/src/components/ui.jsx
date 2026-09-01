@@ -108,9 +108,10 @@ export function ConfirmProvider({ children }) {
 
   useEffect(() => {
     if (!dialog) return
+    // Escape only. Enter used to confirm globally, which turned a stray keypress
+    // into a delete; the focused button handles Enter on its own.
     function onKey(e) {
       if (e.key === 'Escape') close(false)
-      if (e.key === 'Enter') close(true)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -127,8 +128,9 @@ export function ConfirmProvider({ children }) {
               <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8 }}>{dialog.title}</div>
               <div style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.55 }}>{dialog.message}</div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 18 }}>
-                <button className="btn" onClick={() => close(false)} autoFocus>Cancel</button>
-                <button className={`btn ${dialog.danger ? 'danger' : 'primary'}`} onClick={() => close(true)}>
+                <button className="btn" onClick={() => close(false)} autoFocus={dialog.danger}>Cancel</button>
+                <button className={`btn ${dialog.danger ? 'danger' : 'primary'}`} onClick={() => close(true)}
+                        autoFocus={!dialog.danger}>
                   {dialog.confirmLabel}
                 </button>
               </div>

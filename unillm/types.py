@@ -3,7 +3,7 @@ Type definitions for UniLLM
 """
 
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 import time
 
@@ -40,8 +40,25 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
     presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)")
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
+    logprobs: Optional[bool] = Field(None, description="Return log probabilities of the output tokens. Only served by models configured with supports_logprobs")
+    top_logprobs: Optional[int] = Field(None, description="Number of most likely tokens to return at each position, each with a log probability. Requires logprobs=true", ge=0, le=20)
     user: Optional[str] = Field(None, description="Unique user identifier")
     labels: Optional[Dict[str, str]] = Field(None, description="Optional labels for request logging (UniLLM-only, not forwarded to backends)")
+
+    @model_validator(mode="after")
+    def _top_logprobs_requires_logprobs(self):
+        """
+        Reject top_logprobs without logprobs, as OpenAI does.
+
+        Backends disagree on this combination — vLLM 400s, Gemini quietly returns no
+        alternatives — so it is settled here instead of surfacing as a provider-shaped
+        error the caller has to decode.
+        """
+        if self.top_logprobs is not None and not self.logprobs:
+            raise ValueError(
+                "'top_logprobs' is only allowed when 'logprobs' is true"
+            )
+        return self
 
     model_config = {
         "json_schema_extra": {
@@ -69,6 +86,7 @@ class CompletionRequest(BaseModel):
     max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
     presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)")
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
+    logprobs: Optional[int] = Field(None, description="Include log probabilities on the N most likely tokens. Legacy completions use an int here, not a bool", ge=0, le=20)
     user: Optional[str] = Field(None, description="Unique user identifier")
 
     model_config = {
@@ -92,12 +110,36 @@ class Usage(BaseModel):
     total_tokens: int = 0
 
 
+class TopLogprob(BaseModel):
+    """An alternative token considered at one position, with its log probability."""
+    token: str
+    logprob: float
+    # UTF-8 bytes of the token. vLLM supplies these; Gemini does not, so this stays
+    # None rather than being faked from the decoded string, which would be wrong for
+    # tokens that are partial multi-byte sequences.
+    bytes: Optional[List[int]] = None
+
+
+class ChatCompletionTokenLogprob(BaseModel):
+    """The chosen token at one position, plus the alternatives ranked below it."""
+    token: str
+    logprob: float
+    bytes: Optional[List[int]] = None
+    top_logprobs: List[TopLogprob] = Field(default_factory=list)
+
+
+class ChoiceLogprobs(BaseModel):
+    """Per-choice log probabilities, in OpenAI's chat completions shape."""
+    content: Optional[List[ChatCompletionTokenLogprob]] = None
+
+
 class Choice(BaseModel):
     """Chat completion choice"""
     index: int = 0
     message: Optional[Message] = None
     delta: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
+    logprobs: Optional[ChoiceLogprobs] = None
 
 
 class TextChoice(BaseModel):
@@ -105,6 +147,10 @@ class TextChoice(BaseModel):
     index: int = 0
     text: str = ""
     finish_reason: Optional[str] = None
+    # Legacy completions carry a flat, differently-shaped logprobs object
+    # ({tokens, token_logprobs, top_logprobs, text_offset}) rather than ChoiceLogprobs.
+    # Passed through as-is from backends that speak it natively.
+    logprobs: Optional[Dict[str, Any]] = None
 
 
 class ChatCompletionResponse(BaseModel):

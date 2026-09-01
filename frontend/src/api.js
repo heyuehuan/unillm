@@ -1,5 +1,20 @@
 const getToken = () => localStorage.getItem('unillm_token')
 
+// FastAPI validation errors arrive as a list of {loc, msg} objects; rendering
+// that straight into a string gives the user "[object Object]".
+function errorMessage(detail) {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map(d => {
+      const field = Array.isArray(d?.loc) ? d.loc.filter(x => x !== 'body').join('.') : ''
+      const msg = d?.msg || 'invalid value'
+      return field ? `${field}: ${msg}` : msg
+    }).join('; ')
+  }
+  if (detail && typeof detail === 'object') return detail.msg || JSON.stringify(detail)
+  return ''
+}
+
 async function req(method, path, body) {
   const token = getToken()
   const res = await fetch(path, {
@@ -21,7 +36,7 @@ async function req(method, path, body) {
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || 'Request failed')
+    throw new Error(errorMessage(err.detail) || `Request failed (${res.status})`)
   }
   if (res.status === 204) return null
   return res.json()

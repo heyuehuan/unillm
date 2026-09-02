@@ -522,6 +522,17 @@ def update_me(
         current_user.name = req.name or None
         changes["name"] = req.name
     if "email" in req.model_fields_set and (req.email or None) != current_user.email:
+        # Throttled: a duplicate address comes back as a 409, which would otherwise
+        # let any signed-in user test addresses one at a time and learn who holds an
+        # account here. See profile_email_limiter for why the limit sits here rather
+        # than in the error message.
+        retry_after = ratelimit.profile_email_limiter.hit(str(current_user.id))
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many email changes. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
         current_user.email = req.email or None
         changes["email"] = req.email
 

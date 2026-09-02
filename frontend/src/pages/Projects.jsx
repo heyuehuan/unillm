@@ -106,10 +106,16 @@ function KeyRow({ k, models, onRevoke, onSaved, canManage, canReveal }) {
         </td>
         <td>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            {k.active && canReveal && !revealed && (
+            {k.active && canReveal && k.recoverable && !revealed && (
               <button className="btn sm" onClick={reveal} disabled={revealing}>
                 <IcEye size={12} /> {revealing ? '…' : 'Reveal'}
               </button>
+            )}
+            {k.active && canReveal && !k.recoverable && (
+              <span style={{ fontSize: 11.5, color: 'var(--text-3)' }}
+                title="This key was shown once at creation and no recoverable copy was stored.">
+                Shown once
+              </span>
             )}
             {k.active && canManage && (
               <button className="iconbtn" title="Edit key" aria-label="Edit key" onClick={openEdit}>
@@ -180,6 +186,8 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
   const [newKeyName, setNewKeyName] = useState('')
   const [newKeyModels, setNewKeyModels] = useState([])
   const [newKeyCustom, setNewKeyCustom] = useState('')
+  const [newKeyRecoverable, setNewKeyRecoverable] = useState(false)
+  const [recoverableAllowed, setRecoverableAllowed] = useState(false)
   const [justCreated, setJustCreated] = useState(null)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
@@ -196,14 +204,24 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
   useEffect(() => {
     if (canManage) api.getModels().then(setModels).catch(() => {})
   }, [canManage])
+  // Whether this deployment permits recoverable keys at all. Hide the opt-in
+  // rather than offering a choice the server would reject.
+  useEffect(() => {
+    if (canManage) api.getConfig().then(c => setRecoverableAllowed(c.recoverable_keys_allowed)).catch(() => {})
+  }, [canManage])
 
   async function createKey(e) {
     e.preventDefault()
     setCreating(true); setError('')
     try {
-      const res = await api.createKey(project.id, { name: newKeyName, allowed_models: combineModels(newKeyModels, newKeyCustom) })
-      setJustCreated(res.api_key)
+      const res = await api.createKey(project.id, {
+        name: newKeyName,
+        allowed_models: combineModels(newKeyModels, newKeyCustom),
+        recoverable: newKeyRecoverable,
+      })
+      setJustCreated({ key: res.api_key, recoverable: res.key.recoverable })
       setShowCreate(false); setNewKeyName(''); setNewKeyModels([]); setNewKeyCustom('')
+      setNewKeyRecoverable(false)
       await loadKeys()
     } catch (e) { setError(e.message) }
     finally { setCreating(false) }
@@ -252,9 +270,14 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
               </div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>API key created</div>
+                <div className="hint" style={{ marginTop: 2 }}>
+                  {justCreated.recoverable
+                    ? 'A project admin can reveal this key again later.'
+                    : 'Copy it now — this is the only time it will be shown.'}
+                </div>
                 <div className="key-display" style={{ marginTop: 8 }}>
-                  <span className="key-val">{justCreated}</span>
-                  <CopyButton text={justCreated} />
+                  <span className="key-val">{justCreated.key}</span>
+                  <CopyButton text={justCreated.key} />
                 </div>
               </div>
               <button className="iconbtn" aria-label="Dismiss" onClick={() => setJustCreated(null)}><IcX size={14} /></button>
@@ -281,6 +304,21 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
                   custom={newKeyCustom} onCustomChange={setNewKeyCustom} />
               </div>
             </div>
+            {recoverableAllowed && (
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={newKeyRecoverable} style={{ marginTop: 2 }}
+                    onChange={e => setNewKeyRecoverable(e.target.checked)} />
+                  <span>
+                    <span style={{ fontSize: 13 }}>Let project admins reveal this key later</span>
+                    <span className="hint" style={{ display: 'block', marginTop: 2 }}>
+                      Stores an encrypted copy so the key can be read back. Leave this off and the
+                      key is shown once here and nowhere else — safer, but a lost key must be replaced.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button type="button" className="btn" onClick={() => setShowCreate(false)}>Cancel</button>
               <button type="submit" className="btn primary" disabled={creating}>{creating ? 'Creating…' : 'Create key'}</button>

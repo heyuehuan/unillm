@@ -14,7 +14,7 @@ Point the OpenAI SDK at UniLLM, and it handles authentication, per-project API k
 **Team & access management**
 - Users with global roles (`admin`, `user`, `viewer`) and per-project roles (`admin`, `developer`, `viewer`)
 - Projects with per-project API keys; keys can be restricted to specific models
-- API keys stored as SHA-256 hashes, plus an encrypted-at-rest copy for audited admin reveal (disable with `UNILLM_RECOVERABLE_KEYS=false` for show-once-only keys)
+- API keys stored as SHA-256 hashes and shown once by default; a key can opt in at creation to keeping an encrypted-at-rest copy so project admins can reveal it later (audited). A deployment can forbid the opt-in entirely with `UNILLM_RECOVERABLE_KEYS=false`
 - JWT-based management API (`/api/*`) and React web console
 - Optional SSH-signature attribution: requests signed with a user's SSH key are attributed to that user in logs
 
@@ -200,7 +200,7 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 |---|---|---|
 | `UNILLM_JWT_SECRET` | **Production** | JWT signing secret. Unset → random ephemeral secret (sessions/reveals break on restart). |
 | `UNILLM_ENCRYPTION_KEY` | Recommended | Fernet key for API-key-at-rest encryption. Unset → derived from JWT secret. |
-| `UNILLM_RECOVERABLE_KEYS` | No | Default `true`: API keys are stored encrypted and can be revealed later by project admins (audited). Set `false` for show-once-only keys — no plaintext is stored and `/api/keys/{id}/reveal` returns 404 for keys created while disabled. |
+| `UNILLM_RECOVERABLE_KEYS` | No | Default `true`: keys *may* opt in to being revealable later. Recoverability is a per-key choice made at creation and is **off by default** — an ordinary key is shown once and never stored in recoverable form. Set this to `false` to forbid the opt-in deployment-wide: creating a recoverable key returns 400, and `/api/keys/{id}/reveal` returns 404 even for keys that already have a stored copy. |
 | `UNILLM_ADMIN_USERNAME` / `UNILLM_ADMIN_PASSWORD` | Bootstrap | Seed the first admin on startup (no-op if the user exists). |
 | `UNILLM_ADMIN_SYNC` | No | `true` → reset the seeded admin's password/role on every restart (off by default). |
 | `DATABASE_URL` | No | SQLAlchemy URL; default `sqlite:///./unillm.db`. Use PostgreSQL for teams. |
@@ -227,7 +227,8 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 | `POST /api/auth/login` | — | Get a JWT |
 | `GET/PUT /api/users/me`, `GET/POST/PUT /api/users*` | JWT (admin for user mgmt) | Self-service & user administration |
 | `/api/projects*`, `/api/projects/{id}/members*`, `/api/projects/{id}/keys*` | JWT + project role | Projects, membership, API keys |
-| `GET /api/keys/{id}/reveal`, `DELETE /api/keys/{id}` | JWT, project admin | Reveal (audited) / revoke keys |
+| `GET /api/keys/{id}/reveal`, `DELETE /api/keys/{id}` | JWT, project admin | Reveal a key that opted in at creation (audited) / revoke keys |
+| `GET /api/config` | JWT | Deployment flags the UI needs, e.g. whether recoverable keys are allowed |
 | `/api/ssh-keys*` | JWT | Manage & validate your SSH keys |
 | `GET/PUT/DELETE /api/pricing*` | JWT, admin | Per-model pricing |
 | `GET /api/logs/requests`, `/api/logs/stats` | JWT (scoped to your projects) | Request logs & usage stats |
@@ -237,7 +238,7 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 ## Production checklist
 
 - Set a stable `UNILLM_JWT_SECRET` and a dedicated `UNILLM_ENCRYPTION_KEY` (via a secret manager).
-- Decide on key recoverability: keep the default (encrypted, admin-revealable, audited) or set `UNILLM_RECOVERABLE_KEYS=false` so keys are shown once and never stored in recoverable form.
+- Decide on key recoverability: keys are show-once unless the creator opts in, so the default is already conservative. Set `UNILLM_RECOVERABLE_KEYS=false` if no key should ever be recoverable, which also disables reveal for keys created before the change.
 - Use PostgreSQL (`DATABASE_URL`) — the SQLite default is for single-user/dev use.
 - Terminate TLS at a reverse proxy; set `UNILLM_TRUST_PROXY_HEADERS=true` there and bind UniLLM to localhost (default bind is `0.0.0.0`).
 - Security headers are on by default. If your reverse proxy also sets them, drop one of the two — UniLLM only fills in headers that are not already present, but a proxy that appends rather than replaces will produce duplicates.

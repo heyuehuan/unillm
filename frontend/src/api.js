@@ -83,6 +83,7 @@ export const api = {
   removeMember: (projectId, userId) => req('DELETE', `/api/projects/${projectId}/members/${userId}`),
 
   getKeys: (projectId) => req('GET', `/api/projects/${projectId}/keys`),
+  getConfig: () => req('GET', '/api/config'),
   createKey: (projectId, data) => req('POST', `/api/projects/${projectId}/keys`, data),
   updateKey: (keyId, data) => req('PUT', `/api/keys/${keyId}`, data),
   revealKey: (keyId) => req('GET', `/api/keys/${keyId}/reveal`),

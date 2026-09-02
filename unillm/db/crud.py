@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from unillm.config import get_fernet_key, recoverable_keys_enabled
+from unillm.config import get_fernet_key, recoverable_keys_allowed
 from unillm.db.models import APIKey, AuditLog, ModelPricing, Project, RequestLog, SSHKey, User, UserProjectAccess
 from unillm.types import SSHKeyInfo
 
@@ -44,9 +44,18 @@ def _generate_api_key() -> str:
     return "sk-" + secrets.token_urlsafe(36)
 
 
-def _maybe_encrypt_api_key(plaintext: str) -> Optional[str]:
-    """Ciphertext for later reveal, or None when recoverable keys are disabled."""
-    return encrypt_api_key(plaintext) if recoverable_keys_enabled() else None
+def _maybe_encrypt_api_key(plaintext: str, recoverable: bool) -> Optional[str]:
+    """
+    Ciphertext for later reveal, or None.
+
+    Storing nothing is the default and the safe case: a key with no ciphertext
+    cannot be read back out of the database by anyone, ever. Both gates must be
+    open — the deployment has to permit recoverable keys, and this particular key
+    has to have asked for it.
+    """
+    if not recoverable or not recoverable_keys_allowed():
+        return None
+    return encrypt_api_key(plaintext)
 
 
 def _unique_project_name(db: Session, base_name: str) -> str:
@@ -273,7 +282,9 @@ def create_user(
         name="default",
         key_hash=_hash_key(plaintext_key),
         key_prefix=plaintext_key[:8],
-        key_ciphertext=_maybe_encrypt_api_key(plaintext_key),
+        # The personal key is printed once at creation; it is not stored in a
+        # recoverable form, so a lost one is replaced rather than revealed.
+        key_ciphertext=_maybe_encrypt_api_key(plaintext_key, recoverable=False),
         allowed_models=["all"],
     )
     db.add(api_key)
@@ -437,11 +448,14 @@ def create_api_key(
     project_id: int,
     name: str,
     allowed_models: Optional[List[str]] = None,
+    recoverable: bool = False,
 ) -> Tuple[APIKey, str]:
     """
     Create an API key for a project.
-    Returns (api_key, plaintext_key) — plaintext shown once, not stored.
+    Returns (api_key, plaintext_key) — plaintext shown once.
     allowed_models: ["all"] = unrestricted, [] = no access, ["model-a"] = specific
+    recoverable: store an encrypted copy so a project admin can reveal it later.
+      Off by default, so the plaintext exists only in the creation response.
     """
     if allowed_models is None:
         allowed_models = ["all"]
@@ -452,7 +466,7 @@ def create_api_key(
         name=name,
         key_hash=_hash_key(plaintext_key),
         key_prefix=plaintext_key[:8],
-        key_ciphertext=_maybe_encrypt_api_key(plaintext_key),
+        key_ciphertext=_maybe_encrypt_api_key(plaintext_key, recoverable=recoverable),
         allowed_models=allowed_models,
     )
     db.add(api_key)

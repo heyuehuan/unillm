@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from unillm.config import get_jwt_secret
+from unillm.config import get_jwt_secret, recoverable_keys_allowed
 from unillm.db import get_db
 from unillm.db import crud
 from unillm.db.models import APIKey, Project, User
@@ -110,11 +110,18 @@ class APIKeyResponse(BaseModel):
     active: bool
     created_at: datetime
     last_used_at: Optional[datetime]
+    # True when this key can be revealed later. Lets the console show the Reveal
+    # button only where it will work, instead of offering it and then 404ing.
+    recoverable: bool = False
 
 
 class CreateAPIKeyRequest(BaseModel):
     name: str
     allowed_models: Optional[List[str]] = None  # None → ["all"]
+    # Opt in to storing an encrypted copy so a project admin can read this key back
+    # later. Off by default: a key nobody can read back cannot leak from the
+    # database, and the plaintext is right there in this call's response.
+    recoverable: bool = False
 
 
 class CreateAPIKeyResponse(BaseModel):
@@ -281,6 +288,10 @@ def _key_response(k) -> APIKeyResponse:
         id=k.id, name=k.name, key_prefix=k.key_prefix,
         allowed_models=k.allowed_models, active=k.active,
         created_at=k.created_at, last_used_at=k.last_used_at,
+        # Derived rather than stored: holding a decryptable copy is exactly what
+        # "recoverable" means, so the two can never drift apart. The deployment
+        # switch is applied too, so turning it off hides Reveal everywhere at once.
+        recoverable=bool(k.key_ciphertext) and recoverable_keys_allowed(),
     )
 
 
@@ -379,6 +390,25 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
     ratelimit.login_user_limiter.reset(user_key)
     _audit(db, "login_success", request, user=user)
     return TokenResponse(access_token=_create_token(user))
+
+
+# ---------------------------------------------------------------------------
+# Server configuration
+# ---------------------------------------------------------------------------
+
+class ServerConfigResponse(BaseModel):
+    """Deployment switches the console needs in order to render honestly."""
+    recoverable_keys_allowed: bool
+
+
+@router.get("/config", response_model=ServerConfigResponse)
+def get_server_config(_: User = Depends(get_current_user)):
+    """
+    Report deployment-wide toggles. Without this the console would offer a
+    "let me reveal this later" checkbox on a deployment that forbids it, and the
+    create call would fail after the user had filled the form in.
+    """
+    return ServerConfigResponse(recoverable_keys_allowed=recoverable_keys_allowed())
 
 
 # ---------------------------------------------------------------------------
@@ -793,12 +823,24 @@ def create_api_key(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
     if not crud.get_project_by_id(db, project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if req.recoverable and not recoverable_keys_allowed():
+        # Fail loudly. Silently creating a show-once key would leave the caller
+        # believing they can retrieve it later, and they would find out only after
+        # losing it.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Recoverable keys are disabled on this deployment (UNILLM_RECOVERABLE_KEYS=false)",
+        )
     key_obj, plaintext_key = crud.create_api_key(
         db, project_id=project_id, name=req.name, allowed_models=req.allowed_models,
+        recoverable=req.recoverable,
     )
+    # Recoverability is a security-relevant choice, so record which way it went.
     _audit(db, "api_key_created", request, user=current_user,
            resource_type="api_key", resource_id=str(key_obj.id),
-           detail={"name": key_obj.name, "project_id": project_id, "allowed_models": key_obj.allowed_models})
+           detail={"name": key_obj.name, "project_id": project_id,
+                   "allowed_models": key_obj.allowed_models,
+                   "recoverable": bool(key_obj.key_ciphertext)})
     return CreateAPIKeyResponse(key=_key_response(key_obj), api_key=plaintext_key)
 
 
@@ -849,8 +891,14 @@ def reveal_api_key(
     role = crud.get_user_project_role(db, current_user.id, key.project_id)
     if role != "admin" and current_user.global_role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
-    if not key.key_ciphertext:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plaintext not available for this key")
+    if not key.key_ciphertext or not recoverable_keys_allowed():
+        # Either the key was created show-once, or the deployment has since
+        # withdrawn recoverability altogether. Same answer both ways: there is
+        # nothing here to give back.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This key was created without recovery. Revoke it and create a new one.",
+        )
     try:
         plaintext = crud.decrypt_api_key(key.key_ciphertext)
     except Exception:

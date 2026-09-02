@@ -170,8 +170,10 @@ def test_login_unknown_user_no_500(client):
 @pytest.fixture(scope="module")
 def project_and_key(client, admin_token):
     p = client.post("/api/projects", json={"name": "secproj"}, headers=_auth(admin_token)).json()
+    # recoverable=True on purpose — this fixture backs the reveal test, and keys
+    # are created show-once unless they opt in.
     k = client.post(f"/api/projects/{p['id']}/keys",
-                    json={"name": "sec-key", "allowed_models": ["all"]},
+                    json={"name": "sec-key", "allowed_models": ["all"], "recoverable": True},
                     headers=_auth(admin_token)).json()
     return p, k
 

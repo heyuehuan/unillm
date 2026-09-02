@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
-import { IcPlus, IcTrash, IcEdit, IcX, IcCheck } from '../components/Icons.jsx'
+import { IcPlus, IcTrash, IcEdit, IcX, IcCheck, IcBook } from '../components/Icons.jsx'
 import { fmtDate, fmtRelative, copyText, useConfirm } from '../components/ui.jsx'
 
 const SUFFIX_MAX = 20
@@ -348,6 +348,12 @@ export default function SSHKeys({ user }) {
           <h1 className="page-title">My SSH Keys</h1>
         </div>
         <div className="h-actions">
+          {/* An anchor rather than a navigate() button: the page assumes a key the
+              reader may not have yet, and the guide that explains how to make one
+              should be openable in a second tab and copyable as a link. */}
+          <a className="btn ghost" href="#/documentation/ssh-keys" title="How to create, register and use an SSH key">
+            <IcBook size={14} /> Guide
+          </a>
           {keys.length > 0 && !showValidate && (
             <button className="btn" onClick={openValidate}>Validate my key</button>
           )}

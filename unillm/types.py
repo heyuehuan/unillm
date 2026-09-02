@@ -34,12 +34,15 @@ class ChatCompletionRequest(BaseModel):
     messages: List[Message] = Field(..., description="List of messages in the conversation")
     temperature: Optional[float] = Field(None, description="Sampling temperature (0-2)", ge=0, le=2)
     top_p: Optional[float] = Field(None, description="Nucleus sampling parameter", ge=0, le=1)
-    n: Optional[int] = Field(1, description="Number of completions to generate")
+    # Bounded: n multiplies the work a single request costs the backend, and an
+    # unbounded value is a cheap way to turn one request into an expensive one.
+    # 128 is the ceiling OpenAI documents.
+    n: Optional[int] = Field(1, description="Number of completions to generate (1-128)", ge=1, le=128)
     stream: Optional[bool] = Field(False, description="Whether to stream the response")
     stop: Optional[Union[str, List[str]]] = Field(None, description="Stop sequences")
     max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
-    presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)")
-    frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
+    presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)", ge=-2, le=2)
+    frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)", ge=-2, le=2)
     logprobs: Optional[bool] = Field(None, description="Return log probabilities of the output tokens. Only served by models configured with supports_logprobs")
     top_logprobs: Optional[int] = Field(None, description="Number of most likely tokens to return at each position, each with a log probability. Requires logprobs=true", ge=0, le=20)
     logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Thins top_logprobs at confident positions; the chosen token's own logprob is always kept. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
@@ -103,12 +106,15 @@ class CompletionRequest(BaseModel):
     prompt: Union[str, List[str]] = Field(..., description="The prompt to complete", examples=["Once upon a time"])
     temperature: Optional[float] = Field(None, description="Sampling temperature (0-2)", ge=0, le=2)
     top_p: Optional[float] = Field(None, description="Nucleus sampling parameter", ge=0, le=1)
-    n: Optional[int] = Field(1, description="Number of completions to generate")
+    # Bounded: n multiplies the work a single request costs the backend, and an
+    # unbounded value is a cheap way to turn one request into an expensive one.
+    # 128 is the ceiling OpenAI documents.
+    n: Optional[int] = Field(1, description="Number of completions to generate (1-128)", ge=1, le=128)
     stream: Optional[bool] = Field(False, description="Whether to stream the response")
     stop: Optional[Union[str, List[str]]] = Field(None, description="Stop sequences")
     max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
-    presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)")
-    frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
+    presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)", ge=-2, le=2)
+    frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)", ge=-2, le=2)
     logprobs: Optional[int] = Field(None, description="Include log probabilities on the N most likely tokens. Legacy completions use an int here, not a bool", ge=0, le=20)
     logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Requires a non-zero logprobs. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
     logprobs_last_n: Optional[int] = Field(None, description="Return logprobs for only the final N generated positions instead of every position. Use 1 for the last token alone. Requires a non-zero logprobs. UniLLM-only, applied to the response rather than forwarded", ge=1)

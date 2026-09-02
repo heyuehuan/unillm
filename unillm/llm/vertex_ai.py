@@ -18,6 +18,7 @@ import httpx
 from google.auth.credentials import Credentials
 
 from unillm._logging import verbose_proxy_logger
+from unillm.llm import finish_reasons
 from unillm.llm.params import CHAT_LOGPROB_PARAMS
 from unillm.types import (
     ChatCompletionResponse,
@@ -259,18 +260,10 @@ class VertexAIHandler:
                 if "text" in part:
                     text_parts.append(part["text"])
             
-            finish_reason = candidate.get("finishReason", "stop")
-            # Map Gemini finish reasons to OpenAI
-            finish_reason_map = {
-                "STOP": "stop",
-                "MAX_TOKENS": "length",
-                "SAFETY": "content_filter",
-                "RECITATION": "content_filter",
-            }
-            finish_reason = finish_reason_map.get(finish_reason, "stop")
-            
+            finish_reason = finish_reasons.from_name(candidate.get("finishReason")) or "stop"
+
             choices.append(Choice(
-                index=i,
+                index=candidate.get("index", i),
                 message=Message(
                     role="assistant",
                     content="".join(text_parts) if text_parts else None
@@ -411,17 +404,14 @@ class VertexAIHandler:
             if text_parts:
                 delta["content"] = "".join(text_parts)
 
-            finish_reason = candidate.get("finishReason")
-            if finish_reason:
-                finish_reason_map = {
-                    "STOP": "stop",
-                    "MAX_TOKENS": "length",
-                    "SAFETY": "content_filter",
-                }
-                finish_reason = finish_reason_map.get(finish_reason, "stop")
-            
+            finish_reason = finish_reasons.from_name(candidate.get("finishReason"))
+
             choice: Dict[str, Any] = {
-                "index": i,
+                # The candidate's own index, not its position in this chunk. With
+                # n > 1 a chunk carries only the candidates that produced tokens,
+                # so counting positions relabels candidate 2 as candidate 0 and the
+                # client stitches two different completions into one.
+                "index": candidate.get("index", i),
                 "delta": delta,
                 "finish_reason": finish_reason,
             }

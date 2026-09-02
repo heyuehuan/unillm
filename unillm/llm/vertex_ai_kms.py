@@ -29,12 +29,14 @@ import json
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, Content, Part
 
 from unillm._logging import verbose_proxy_logger
+from unillm.llm import finish_reasons
 from unillm.llm.params import CHAT_LOGPROB_PARAMS
 from unillm.types import (
     ChatCompletionResponse,
@@ -315,18 +317,12 @@ class VertexAIKMSHandler:
                     if hasattr(part, 'text') and part.text:
                         text_parts.append(part.text)
 
-            finish_reason = "stop"
-            if hasattr(candidate, 'finish_reason'):
-                finish_reason_map = {
-                    1: "stop",
-                    2: "length",
-                    3: "content_filter",
-                    4: "content_filter",
-                }
-                finish_reason = finish_reason_map.get(candidate.finish_reason, "stop")
+            finish_reason = finish_reasons.from_enum(
+                getattr(candidate, "finish_reason", None)
+            ) or "stop"
 
             choices.append(Choice(
-                index=i,
+                index=getattr(candidate, "index", None) or i,
                 message=Message(
                     role="assistant",
                     content="".join(text_parts) if text_parts else None
@@ -456,7 +452,19 @@ class VertexAIKMSHandler:
         thread = threading.Thread(target=_produce, daemon=True)
         thread.start()
 
+        def _wrap(choice: Dict[str, Any]) -> str:
+            return "data: " + json.dumps({
+                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [choice],
+            }) + "\n\n"
+
         last_usage_metadata = None
+        # Finish reason per candidate, in the order the candidates first appeared,
+        # so the closing chunks can report what actually happened to each one.
+        finish_by_index: "OrderedDict[int, Optional[str]]" = OrderedDict()
         try:
             while True:
                 item = await queue.get()
@@ -469,31 +477,48 @@ class VertexAIKMSHandler:
                     last_usage_metadata = chunk.usage_metadata
                 if chunk.candidates:
                     for candidate in chunk.candidates:
+                        # The candidate's own index, not its position in this chunk:
+                        # with n > 1 a chunk carries only the candidates that produced
+                        # tokens, so counting positions merges separate completions.
+                        index = getattr(candidate, "index", None) or 0
+                        reason = finish_reasons.from_enum(
+                            getattr(candidate, "finish_reason", None)
+                        )
+                        finish_by_index.setdefault(index, None)
+                        if reason is not None:
+                            finish_by_index[index] = reason
+
                         # Logprobs arrive once per candidate, but a candidate can span
                         # several parts. Attach them to the first chunk emitted for
                         # this candidate so they aren't repeated for every part.
                         pending_logprobs = self._convert_logprobs(
                             getattr(candidate, "logprobs_result", None)
                         )
-                        if candidate.content and candidate.content.parts:
-                            for part in candidate.content.parts:
-                                if hasattr(part, 'text') and part.text:
-                                    choice: Dict[str, Any] = {
-                                        "index": 0,
-                                        "delta": {"content": part.text},
-                                        "finish_reason": None,
-                                    }
-                                    if pending_logprobs is not None:
-                                        choice["logprobs"] = pending_logprobs.model_dump()
-                                        pending_logprobs = None
-                                    openai_chunk = {
-                                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                                        "object": "chat.completion.chunk",
-                                        "created": int(time.time()),
-                                        "model": model,
-                                        "choices": [choice],
-                                    }
-                                    yield f"data: {json.dumps(openai_chunk)}\n\n"
+                        parts = candidate.content.parts if candidate.content else None
+                        for part in (parts or []):
+                            if not (hasattr(part, 'text') and part.text):
+                                continue
+                            choice: Dict[str, Any] = {
+                                "index": index,
+                                "delta": {"content": part.text},
+                                "finish_reason": None,
+                            }
+                            if pending_logprobs is not None:
+                                choice["logprobs"] = pending_logprobs.model_dump()
+                                pending_logprobs = None
+                            yield _wrap(choice)
+
+                        # A candidate can carry logprobs on a chunk with no text —
+                        # the final one, typically, which only reports the finish
+                        # reason. Emitting an empty delta keeps them rather than
+                        # dropping the last position's alternatives on the floor.
+                        if pending_logprobs is not None:
+                            yield _wrap({
+                                "index": index,
+                                "delta": {},
+                                "finish_reason": None,
+                                "logprobs": pending_logprobs.model_dump(),
+                            })
         finally:
             # Tell the producer to stop and wait for it off the event loop — the old
             # blocking join(30) could stall the whole loop for up to 30s when a
@@ -501,16 +526,22 @@ class VertexAIKMSHandler:
             stop.set()
             await asyncio.to_thread(thread.join, 30)
 
+        # One closing chunk per candidate, carrying the reason Vertex actually gave.
+        # This used to be a single hardcoded "stop", so a response cut short by the
+        # token limit or blocked by a safety filter was reported to the client as a
+        # normal completion — and with n > 1 only one candidate was closed at all.
+        if not finish_by_index:
+            finish_by_index[0] = None
         final_chunk = {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
             "choices": [{
-                "index": 0,
+                "index": index,
                 "delta": {},
-                "finish_reason": "stop",
-            }],
+                "finish_reason": reason or "stop",
+            } for index, reason in finish_by_index.items()],
         }
         if last_usage_metadata:
             prompt = getattr(last_usage_metadata, 'prompt_token_count', 0)

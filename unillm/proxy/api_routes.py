@@ -1268,7 +1268,12 @@ def _resolve_project_filter(db, current_user, requested_ids: List[int]) -> Optio
     """Return the effective project id list to filter by, or None (admin, no filter)."""
     if current_user.global_role == "admin":
         return requested_ids or None
-    accessible = [p.id for p in crud.get_projects_for_user(db, current_user.id)]
+    # Archived projects count here. Archiving takes a project out of the active list
+    # and stops its keys working; it does not revoke anyone's membership, and it
+    # should not make a member's own past usage disappear from their logs and stats
+    # while an admin can still see all of it.
+    accessible = [p.id for p in crud.get_projects_for_user(
+        db, current_user.id, include_archived=True)]
     if requested_ids:
         return [i for i in requested_ids if i in accessible]
     return accessible

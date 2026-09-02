@@ -106,7 +106,10 @@ def test_app_policy_still_allows_what_the_console_needs(client):
 def test_docs_policy_allows_the_swagger_cdn(client, path):
     csp = _csp_directives(client.get(path).headers["Content-Security-Policy"])
     assert "https://cdn.jsdelivr.net" in csp["script-src"]
-    assert "'unsafe-inline'" in csp["script-src"]  # FastAPI's inline bootstrap
+    # FastAPI's inline bootstrap is allowed by nonce, not by 'unsafe-inline' —
+    # see tests/test_docs_csp.py.
+    assert any(token.startswith("'nonce-") for token in csp["script-src"])
+    assert "'unsafe-inline'" not in csp["script-src"]
     assert csp["frame-ancestors"] == ["'none'"]    # still not embeddable
 
 

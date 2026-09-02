@@ -16,7 +16,12 @@ import httpx
 import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.openapi.docs import (
+    get_redoc_html,
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from unillm import __version__
 from unillm._logging import verbose_proxy_logger, set_verbose
@@ -32,7 +37,7 @@ from unillm.proxy.auth import (
 from unillm.proxy.api_routes import router as api_router, _client_ip
 from unillm.proxy import ratelimit
 from unillm.proxy import server_settings
-from unillm.proxy.security_headers import apply_security_headers, DOCS_PATHS
+from unillm.proxy.security_headers import apply_security_headers, new_csp_nonce, DOCS_PATHS
 from unillm.types import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -211,8 +216,10 @@ app = FastAPI(
     description="A minimal OpenAI-compatible API proxy for Vertex AI Gemini",
     version=__version__,
     lifespan=lifespan,
-    docs_url="/docs",      # Swagger UI at /docs
-    redoc_url="/redoc",    # ReDoc at /redoc
+    # The docs pages are served by hand below so their inline bootstrap script can
+    # carry a CSP nonce; FastAPI's built-in routes have nowhere to put one.
+    docs_url=None,
+    redoc_url=None,
     openapi_url="/openapi.json",
 )
 
@@ -253,7 +260,45 @@ async def _throttle_public_docs(request: Request, call_next):
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     """Outermost middleware, so every response — including errors — carries the headers."""
+    if request.url.path in DOCS_PATHS:
+        # Minted here rather than in the route so the header and the page agree
+        # even when the route never runs — a 429 from the throttle above, say.
+        request.state.csp_nonce = new_csp_nonce()
     return apply_security_headers(request, await call_next(request))
+
+
+def _with_nonce(request: Request, response: HTMLResponse) -> HTMLResponse:
+    """Tag the docs page's inline script blocks with this response's CSP nonce."""
+    nonce = getattr(request.state, "csp_nonce", None)
+    if not nonce:
+        return response
+    body = response.body.decode()
+    return HTMLResponse(
+        body.replace("<script>", f'<script nonce="{nonce}">'),
+        status_code=response.status_code,
+    )
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui_docs(request: Request):
+    return _with_nonce(request, get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - Swagger UI",
+        oauth2_redirect_url="/docs/oauth2-redirect",
+    ))
+
+
+@app.get("/docs/oauth2-redirect", include_in_schema=False)
+async def swagger_ui_redirect(request: Request):
+    return _with_nonce(request, get_swagger_ui_oauth2_redirect_html())
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_docs(request: Request):
+    return _with_nonce(request, get_redoc_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - ReDoc",
+    ))
 
 
 # Management API routes

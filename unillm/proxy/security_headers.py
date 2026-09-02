@@ -7,15 +7,18 @@ None of the usual browser-side defences were being sent. This module adds them.
 
 Two Content-Security-Policy variants are needed. The app policy is strict:
 scripts may only come from this origin, so injected inline script never runs. The
-docs policy is looser because Swagger UI and ReDoc are loaded from a CDN and
-bootstrap themselves with an inline script — that is FastAPI's design, and those
-pages carry no session, so relaxing the policy there costs nothing.
+docs policy has to allow the CDN that Swagger UI and ReDoc load from, plus the
+inline script they bootstrap themselves with — that is FastAPI's design. It
+allows that one script by nonce rather than by 'unsafe-inline', because /docs is
+the same origin as the admin UI and can therefore read the session token the UI
+keeps in localStorage.
 
 Everything is overridable by environment variable, because a policy that breaks
 an unusual deployment is worse than no policy at all if the only fix is a fork.
 """
 
 import os
+import secrets
 from typing import Dict, Optional
 
 from starlette.requests import Request
@@ -44,18 +47,35 @@ _APP_CSP = (
 
 # Swagger UI and ReDoc: CDN assets, an inline bootstrap script, and a blob: worker
 # for ReDoc's renderer.
-_DOCS_CSP = (
-    "default-src 'self'; "
-    "base-uri 'self'; "
-    "frame-ancestors 'none'; "
-    "object-src 'none'; "
-    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-    "font-src 'self' data: https://fonts.gstatic.com; "
-    "img-src 'self' data: https://fastapi.tiangolo.com https://cdn.redoc.ly; "
-    "worker-src 'self' blob:; "
-    "connect-src 'self'"
-)
+#
+# The inline script is allowed by a per-response nonce rather than by
+# 'unsafe-inline'. The distinction matters because /docs shares an origin with the
+# admin UI, and that origin's localStorage holds a session JWT — so script that
+# runs on the docs page can read it. 'unsafe-inline' permits any injected script;
+# a nonce permits only the one block this server emitted, which an attacker cannot
+# predict. Browsers that understand nonces ignore 'unsafe-inline' entirely, so
+# there is nothing to fall back to.
+def docs_csp(nonce: Optional[str]) -> str:
+    script_src = "'self' https://cdn.jsdelivr.net"
+    script_src += f" 'nonce-{nonce}'" if nonce else " 'unsafe-inline'"
+    return (
+        "default-src 'self'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "object-src 'none'; "
+        f"script-src {script_src}; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+        "font-src 'self' data: https://fonts.gstatic.com; "
+        "img-src 'self' data: https://fastapi.tiangolo.com https://cdn.redoc.ly; "
+        "worker-src 'self' blob:; "
+        "connect-src 'self'"
+    )
+
+
+def new_csp_nonce() -> str:
+    """A fresh nonce for one docs response. Must never be reused across responses."""
+    return secrets.token_urlsafe(16)
+
 
 _STATIC_HEADERS: Dict[str, str] = {
     # Stop the browser guessing a content type — the classic way a user-supplied
@@ -125,7 +145,10 @@ def apply_security_headers(request: Request, response: Response) -> Response:
     for name, value in _STATIC_HEADERS.items():
         response.headers.setdefault(name, value)
 
-    csp = _DOCS_CSP if request.url.path in DOCS_PATHS else _app_csp()
+    if request.url.path in DOCS_PATHS:
+        csp = docs_csp(getattr(request.state, "csp_nonce", None))
+    else:
+        csp = _app_csp()
     if csp:
         response.headers.setdefault("Content-Security-Policy", csp)
 

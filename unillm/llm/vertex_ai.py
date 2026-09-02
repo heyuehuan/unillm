@@ -547,6 +547,12 @@ class VertexAIHandler:
                             for c in chat_chunk.get("choices", [])
                         ],
                     }
+                    # Token counts arrive on the final chunk and were being dropped
+                    # here, so a streamed /v1/completions call logged zero tokens and
+                    # zero cost — the usage the caller asked for never reached them
+                    # either. Carry the key through only when the backend sent it.
+                    if chat_chunk.get("usage") is not None:
+                        text_chunk["usage"] = chat_chunk["usage"]
                     yield f"data: {json.dumps(text_chunk)}\n\n"
                 except json.JSONDecodeError:
                     continue

@@ -383,6 +383,7 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 | `UNILLM_MASTER_KEY` / `UNILLM_API_KEYS` | No | Static env-var API keys (fallback when not in DB). |
 | `UNILLM_CORS_ORIGINS` | No | Comma-separated cross-origin allowlist. Default: same-origin only. |
 | `UNILLM_TRUST_PROXY_HEADERS` | No | `true` → trust `X-Forwarded-For` for client IPs (only behind a trusted reverse proxy). |
+| `UNILLM_TRUSTED_PROXY_HOPS` | No | Number of reverse proxies in front of UniLLM (default `1`). Decides which `X-Forwarded-For` entry is the client. |
 | `UNILLM_LOGIN_RATE_LIMIT` | No | Login attempts allowed per client IP, as `<count>/<seconds>`. Default `30/60`. `off` disables. |
 | `UNILLM_LOGIN_FAILURE_LIMIT` | No | Failed logins allowed per username across all IPs. Default `5/900`. Cleared on a successful login; `off` disables. |
 | `UNILLM_DOCS_RATE_LIMIT` | No | Requests per client IP to `/docs`, `/redoc` and `/openapi.json`. Default `30/60`. `off` disables. |
@@ -416,6 +417,9 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 - Decide on key recoverability: keys are show-once unless the creator opts in, so the default is already conservative. Set `UNILLM_RECOVERABLE_KEYS=false` if no key should ever be recoverable, which also disables reveal for keys created before the change.
 - Use PostgreSQL (`DATABASE_URL`) — the SQLite default is for single-user/dev use.
 - Terminate TLS at a reverse proxy; set `UNILLM_TRUST_PROXY_HEADERS=true` there and bind UniLLM to localhost (default bind is `0.0.0.0`).
+  Set `UNILLM_TRUSTED_PROXY_HOPS` to the number of proxies in the chain — UniLLM reads that many entries back from the end of
+  `X-Forwarded-For`, because the leading entries of that header are written by the client. Leaving the trust flag off behind a
+  proxy is also wrong: every client then shares the proxy's address, so one caller's failed logins throttle everyone.
 - Security headers are on by default. If your reverse proxy also sets them, drop one of the two — UniLLM only fills in headers that are not already present, but a proxy that appends rather than replaces will produce duplicates.
 - Review the built-in rate limits (`UNILLM_LOGIN_RATE_LIMIT`, `UNILLM_LOGIN_FAILURE_LIMIT`, `UNILLM_DOCS_RATE_LIMIT`). They are per-process, so with several replicas each enforces its own share — add a shared limiter at the reverse proxy if you run more than one.
 - Set model pricing in the console so request costs are recorded.

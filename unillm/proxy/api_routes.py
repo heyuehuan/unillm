@@ -20,6 +20,7 @@ from unillm.config import get_jwt_secret, recoverable_keys_allowed
 from unillm.db import get_db
 from unillm.db import crud
 from unillm.db.models import APIKey, Project, User
+from unillm.proxy import forwarded
 from unillm.proxy import ratelimit
 from unillm.proxy import server_settings
 
@@ -231,17 +232,13 @@ class UpsertModelPricingRequest(BaseModel):
 
 def _client_ip(request: Request) -> Optional[str]:
     """
-    Resolve the client IP. Behind a reverse proxy request.client.host is the proxy,
-    so honor X-Forwarded-For only when explicitly opted in (UNILLM_TRUST_PROXY_HEADERS=true),
-    taking the first (client) hop. XFF is trivially spoofable when not fronted by a
-    trusted proxy, hence the opt-in.
+    Resolve the client IP, honoring X-Forwarded-For only behind a trusted proxy.
+
+    See unillm.proxy.forwarded for why the entry is counted from the right: the
+    leading entries of that header are written by the client, so reading them
+    would let a caller pick its own rate-limit bucket and audit-log identity.
     """
-    import os
-    if os.getenv("UNILLM_TRUST_PROXY_HEADERS", "").lower() == "true":
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()
-    return request.client.host if request.client else None
+    return forwarded.client_ip(request)
 
 
 def hash_password(password: str) -> str:

@@ -21,6 +21,8 @@ from typing import Dict, Optional
 from starlette.requests import Request
 from starlette.responses import Response
 
+from unillm.proxy import forwarded
+
 # Paths that render the interactive API docs. They need the relaxed policy.
 DOCS_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc"})
 
@@ -92,10 +94,9 @@ def _is_https(request: Request) -> bool:
     if request.url.scheme == "https":
         return True
     # Behind a TLS-terminating proxy the scheme is http here. Trust the forwarded
-    # header only under the same opt-in that governs forwarded client IPs.
-    if os.getenv("UNILLM_TRUST_PROXY_HEADERS", "").strip().lower() == "true":
-        return request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
-    return False
+    # header only under the same opt-in that governs forwarded client IPs, and read
+    # the same trusted position in the chain.
+    return forwarded.forwarded_proto_is_https(request)
 
 
 def _hsts_value() -> Optional[str]:

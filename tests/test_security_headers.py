@@ -89,15 +89,25 @@ def test_app_policy_locks_down_framing_and_plugins(client):
 def test_app_policy_still_allows_what_the_console_needs(client):
     """
     A policy that breaks the UI gets switched off, so it has to permit the real
-    dependencies: the bundled assets, Google Fonts, inline style attributes from
-    React, and data: URIs for inline icons.
+    dependencies: the bundled assets, inline style attributes from React, and
+    data: URIs for inline icons.
     """
     csp = _csp_directives(client.get("/health").headers["Content-Security-Policy"])
     assert "'unsafe-inline'" in csp["style-src"]
-    assert "https://fonts.googleapis.com" in csp["style-src"]
-    assert "https://fonts.gstatic.com" in csp["font-src"]
     assert "data:" in csp["img-src"]
     assert csp["connect-src"] == ["'self'"]
+
+
+def test_app_policy_allows_no_third_party_origin(client):
+    """
+    The console loads no web fonts and no CDN assets, so nothing it renders should
+    be able to reach another host — that includes styles and fonts, which is where
+    the Google Fonts allowance used to sit.
+    """
+    csp = _csp_directives(client.get("/health").headers["Content-Security-Policy"])
+    for directive in ("default-src", "script-src", "style-src", "font-src", "img-src", "connect-src"):
+        remote = [t for t in csp.get(directive, []) if t.startswith("http")]
+        assert remote == [], f"{directive} allows {remote}"
 
 
 # --- docs get their own, looser policy -------------------------------------------

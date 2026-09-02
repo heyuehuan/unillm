@@ -29,7 +29,9 @@ from unillm.proxy import forwarded
 # Paths that render the interactive API docs. They need the relaxed policy.
 DOCS_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc"})
 
-# Strict policy for the app and the API. No inline or third-party script at all.
+# Strict policy for the app and the API. No inline or third-party script at all,
+# and no third-party origin of any kind: the console ships its own assets and uses
+# the operating system's fonts, so nothing it renders reaches off this host.
 # 'unsafe-inline' is present for styles only: React sets inline style attributes
 # throughout the UI, and an injected style cannot execute code.
 _APP_CSP = (
@@ -39,8 +41,8 @@ _APP_CSP = (
     "frame-ancestors 'none'; "
     "object-src 'none'; "
     "script-src 'self'; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-    "font-src 'self' data: https://fonts.gstatic.com; "
+    "style-src 'self' 'unsafe-inline'; "
+    "font-src 'self' data:; "
     "img-src 'self' data:; "
     "connect-src 'self'"
 )

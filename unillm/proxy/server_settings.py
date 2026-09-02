@@ -23,6 +23,7 @@ invalidated on write would go stale in every *other* worker.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -205,12 +206,28 @@ def get_setting_cached(key: str) -> Any:
     The proxy's completion path has no database dependency and should not grow one
     just to read a limit, so a session is opened only when the cache is cold.
     """
-    global _cache, _cache_expires_at
-    now = time.monotonic()
-    if _cache and now < _cache_expires_at:
+    if _cache_is_warm():
         return _cache.get(key, SETTINGS[key].default)
     db = SessionLocal()
     try:
         return get_setting(db, key)
     finally:
         db.close()
+
+
+def _cache_is_warm() -> bool:
+    return bool(_cache) and time.monotonic() < _cache_expires_at
+
+
+async def get_setting_cached_async(key: str) -> Any:
+    """
+    get_setting_cached from async code.
+
+    The warm path is a dictionary lookup and stays inline. The cold path opens a
+    session and reads the overrides table, which is blocking work; running it on
+    the event loop stalled every other in-flight request once per cache period, and
+    for as long as the database took — which on a locked SQLite file is not short.
+    """
+    if _cache_is_warm():
+        return _cache.get(key, SETTINGS[key].default)
+    return await asyncio.to_thread(get_setting_cached, key)

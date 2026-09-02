@@ -394,8 +394,13 @@ class VertexAIKMSHandler:
         verbose_proxy_logger.debug(f"Contents count: {len(contents)}")
         verbose_proxy_logger.debug(f"Generation config: {generation_config}")
 
-        model_obj = self._get_model(model, effective_project, effective_location,
-                                    effective_kms_key_name, system_instruction=system_instruction)
+        # Off the event loop: on a cache miss this takes a process-wide lock, may
+        # call vertexai.init(), and builds a gRPC prediction client. Inline, one
+        # cold model blocked every other request the proxy was serving.
+        model_obj = await asyncio.to_thread(
+            self._get_model, model, effective_project, effective_location,
+            effective_kms_key_name, system_instruction,
+        )
 
         try:
             if stream:

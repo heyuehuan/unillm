@@ -619,12 +619,18 @@ async def _stream_with_logging(
         yield f"data: {json.dumps({'error': {'message': 'Upstream model provider error', 'type': 'upstream_error'}})}\n\n"
         raise
     finally:
-        _write_request_log(
+        # Off the event loop. This opens a session, reads the pricing table and
+        # inserts a row; run inline it stalled every other in-flight request for
+        # the duration of that write, which on a locked SQLite file is not short.
+        # Shielded so a client disconnect — which cancels this task right here —
+        # still leaves a log row behind rather than losing the request entirely.
+        await asyncio.shield(asyncio.to_thread(
+            _write_request_log,
             model=model_alias, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             status_code=status_code, error_message=error_message,
             latency_ms=int((time.time() - start_time) * 1000),
             **log_fields,
-        )
+        ))
 
 
 
@@ -653,8 +659,8 @@ class _LogprobsPlan(NamedTuple):
     rejection: Optional[str]
 
 
-def _logprobs_response_plan(request_body, max_tokens: Optional[int], top_logprobs: Optional[int],
-                            wire_format: Optional[str] = None) -> "_LogprobsPlan":
+async def _logprobs_response_plan(request_body, max_tokens: Optional[int], top_logprobs: Optional[int],
+                                  wire_format: Optional[str] = None) -> "_LogprobsPlan":
     """
     Work out how this request's logprobs will be shaped and sized before calling out.
 
@@ -677,7 +683,7 @@ def _logprobs_response_plan(request_body, max_tokens: Optional[int], top_logprob
     if not _returns_logprobs(request_body):
         return _LogprobsPlan(min_logprob, response_format, None, LogprobsBudget(None), None)
 
-    max_bytes = server_settings.get_setting_cached(server_settings.LOGPROBS_MAX_BYTES)
+    max_bytes = await server_settings.get_setting_cached_async(server_settings.LOGPROBS_MAX_BYTES)
     floor = min_bytes_estimate(max_tokens, top_logprobs, response_format, last_n=last_n)
     rejection = None
     if floor is not None and floor > max_bytes:
@@ -766,7 +772,7 @@ async def chat_completions(
     # Resolved once per request: the floor, the wire format and the size cap are all
     # response-side concerns the proxy applies itself, so none of them reach the backend
     # and none belong in handler_kwargs.
-    plan = _logprobs_response_plan(request_body, max_tokens, request_body.top_logprobs)
+    plan = await _logprobs_response_plan(request_body, max_tokens, request_body.top_logprobs)
     if plan.rejection:
         _log(status_code=413, error_message=plan.rejection)
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -907,7 +913,7 @@ async def completions(
         )
 
     # `logprobs` is a count here, not a bool, and doubles as the per-position width.
-    plan = _logprobs_response_plan(request_body, max_tokens, request_body.logprobs,
+    plan = await _logprobs_response_plan(request_body, max_tokens, request_body.logprobs,
                                    wire_format=COMPACT_FORMAT)
     if plan.rejection:
         _log(status_code=413, error_message=plan.rejection)

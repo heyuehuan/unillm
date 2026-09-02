@@ -97,6 +97,16 @@ def get_all_ssh_keys(db: Session) -> Dict[str, SSHKeyInfo]:
     keys = db.query(SSHKey).join(SSHKey.user).filter(User.active == True).all()
     result = {}
     for key in keys:
+        if key.key_name in result:
+            # Names are unique by construction and by check; a duplicate means rows
+            # predating that check, and silently keeping whichever came last would
+            # attribute one account's signed requests to another.
+            from unillm._logging import verbose_proxy_logger
+            verbose_proxy_logger.error(
+                f"SSH key name {key.key_name!r} is registered to more than one account; "
+                "ignoring the duplicate. Rename one of them."
+            )
+            continue
         result[key.key_name] = SSHKeyInfo(
             key_name=key.key_name,
             public_key=key.public_key,
@@ -119,6 +129,13 @@ def _validate_key_name(key_name: str, username: str) -> None:
         raise ValueError("Key name suffix cannot be empty")
     if not re.match(r'^[a-zA-Z0-9-]+$', suffix):
         raise ValueError("Key name suffix must contain only letters, numbers, and hyphens")
+    # '--' is the separator between the username and the suffix, so allowing it
+    # inside the suffix makes the split ambiguous: usernames may contain hyphens,
+    # and 'alice--x--1' would then be a legal name for both 'alice' (suffix 'x--1')
+    # and 'alice--x' (suffix '1'). Signature verification looks keys up by name
+    # alone, so two users could end up fighting over one entry.
+    if "--" in suffix:
+        raise ValueError("Key name suffix cannot contain '--'")
     if len(suffix) > 20:
         raise ValueError("Key name suffix must be 20 characters or fewer")
 
@@ -150,7 +167,10 @@ def add_ssh_key(db: Session, user_id: int, username: str, key_name: str, public_
     _validate_ssh_public_key(public_key)
     if db.query(SSHKey).filter(SSHKey.user_id == user_id).count() >= 3:
         raise ValueError("Maximum of 3 SSH keys allowed per user")
-    if db.query(SSHKey).filter(SSHKey.user_id == user_id, SSHKey.key_name == key_name).first():
+    # Checked across all users, not just this one: verification resolves a signature
+    # by key name alone, so a name shared by two accounts would attribute one user's
+    # requests to the other.
+    if db.query(SSHKey).filter(SSHKey.key_name == key_name).first():
         raise ValueError(f"Key name '{key_name}' is already in use")
     key = SSHKey(user_id=user_id, key_name=key_name, public_key=public_key)
     db.add(key)
@@ -166,7 +186,7 @@ def update_ssh_key(db: Session, key_id: int, user_id: int, username: str,
         return None
     if key_name is not None:
         _validate_key_name(key_name, username)
-        if db.query(SSHKey).filter(SSHKey.user_id == user_id, SSHKey.key_name == key_name, SSHKey.id != key_id).first():
+        if db.query(SSHKey).filter(SSHKey.key_name == key_name, SSHKey.id != key_id).first():
             raise ValueError(f"Key name '{key_name}' is already in use")
         key.key_name = key_name
     if public_key is not None:

@@ -44,9 +44,28 @@ _bearer = HTTPBearer(auto_error=False)
 # Request / Response schemas
 # ---------------------------------------------------------------------------
 
+# Ceilings on free-text fields. Pydantic will accept a string of any size
+# otherwise, so a single request could carry megabytes into a column sized for a
+# name — costing memory to parse, disk to store, and rendering time in the console
+# forever after. The numbers are generous enough that no real value hits them.
+_MAX_NAME_LEN = 128          # display names, project names, key names
+_MAX_EMAIL_LEN = 254         # the longest address SMTP permits
+_MAX_DESCRIPTION_LEN = 2048
+# Long enough for an RSA-4096 authorized_keys line with a comment, which is the
+# largest key OpenSSH realistically produces.
+_MAX_PUBLIC_KEY_LEN = 8192
+# An API key, a key name, and a base64 signature joined by '||'.
+_MAX_SIGNED_KEY_LEN = 8192
+# Passwords are capped at 72 when set (bcrypt ignores anything beyond that), but a
+# login has to accept whatever the caller typed before it can reject it.
+_MAX_PASSWORD_LEN = 1024
+# No deployment serves anywhere near this many distinct models.
+_MAX_MODEL_LIST_LEN = 512
+
+
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., max_length=_MAX_NAME_LEN)
+    password: str = Field(..., max_length=_MAX_PASSWORD_LEN)
 
 
 class TokenResponse(BaseModel):
@@ -71,9 +90,9 @@ _MIN_PASSWORD_LEN = 8
 
 class CreateUserRequest(BaseModel):
     username: str = Field(..., pattern=_USERNAME_PATTERN)
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=_MAX_NAME_LEN)
     password: str = Field(..., min_length=_MIN_PASSWORD_LEN, max_length=72)
-    email: Optional[str] = None
+    email: Optional[str] = Field(None, max_length=_MAX_EMAIL_LEN)
     global_role: GlobalRole = "user"
 
 
@@ -97,13 +116,13 @@ class ProjectResponse(BaseModel):
 
 
 class CreateProjectRequest(BaseModel):
-    name: str
-    description: Optional[str] = None
+    name: str = Field(..., max_length=_MAX_NAME_LEN)
+    description: Optional[str] = Field(None, max_length=_MAX_DESCRIPTION_LEN)
 
 
 class UpdateProjectRequest(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=_MAX_NAME_LEN)
+    description: Optional[str] = Field(None, max_length=_MAX_DESCRIPTION_LEN)
     archived: Optional[bool] = None
 
 
@@ -121,8 +140,8 @@ class APIKeyResponse(BaseModel):
 
 
 class CreateAPIKeyRequest(BaseModel):
-    name: str
-    allowed_models: Optional[List[str]] = None  # None → ["all"]
+    name: str = Field(..., max_length=_MAX_NAME_LEN)
+    allowed_models: Optional[List[str]] = Field(None, max_length=_MAX_MODEL_LIST_LEN)  # None → ["all"]
     # Opt in to storing an encrypted copy so a project admin can read this key back
     # later. Off by default: a key nobody can read back cannot leak from the
     # database, and the plaintext is right there in this call's response.
@@ -143,8 +162,8 @@ class SSHKeyResponse(BaseModel):
 
 
 class AddSSHKeyRequest(BaseModel):
-    key_name: str
-    public_key: str
+    key_name: str = Field(..., max_length=_MAX_NAME_LEN)
+    public_key: str = Field(..., max_length=_MAX_PUBLIC_KEY_LEN)
 
 
 class RequestLogResponse(BaseModel):
@@ -225,8 +244,8 @@ class UpdateServerSettingRequest(BaseModel):
 class UpsertModelPricingRequest(BaseModel):
     input_per_1m: float
     output_per_1m: float
-    currency: str = "USD"
-    notes: Optional[str] = None
+    currency: str = Field("USD", max_length=8)
+    notes: Optional[str] = Field(None, max_length=_MAX_DESCRIPTION_LEN)
 
 
 # ---------------------------------------------------------------------------
@@ -461,10 +480,10 @@ def get_server_config(_: User = Depends(get_current_user), db: Session = Depends
 
 class UpdateMeRequest(BaseModel):
     # Profile fields — no password confirmation required.
-    name: Optional[str] = None
-    email: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=_MAX_NAME_LEN)
+    email: Optional[str] = Field(None, max_length=_MAX_EMAIL_LEN)
     # Password change — both must be provided together.
-    current_password: Optional[str] = None
+    current_password: Optional[str] = Field(None, max_length=_MAX_PASSWORD_LEN)
     new_password: Optional[str] = Field(None, min_length=_MIN_PASSWORD_LEN, max_length=72)
 
 
@@ -551,7 +570,7 @@ def create_user(req: CreateUserRequest, request: Request,                admin: 
 
 
 class AdminUpdateUserRequest(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=_MAX_NAME_LEN)
     global_role: Optional[GlobalRole] = None
     new_password: Optional[str] = Field(None, min_length=_MIN_PASSWORD_LEN, max_length=72)
     password_login_disabled: Optional[bool] = None
@@ -918,8 +937,9 @@ def create_api_key(
 
 
 class UpdateAPIKeyRequest(BaseModel):
-    name: Optional[str] = None
-    allowed_models: Optional[List[str]] = None  # None → leave unchanged; [] → no access
+    name: Optional[str] = Field(None, max_length=_MAX_NAME_LEN)
+    # None → leave unchanged; [] → no access
+    allowed_models: Optional[List[str]] = Field(None, max_length=_MAX_MODEL_LIST_LEN)
 
 
 @router.put("/keys/{key_id}", response_model=APIKeyResponse)
@@ -1039,7 +1059,7 @@ SSH_VALIDATE_CHALLENGE = "sk-12345678"
 
 
 class ValidateSSHKeyRequest(BaseModel):
-    signed_key: str
+    signed_key: str = Field(..., max_length=_MAX_SIGNED_KEY_LEN)
 
 
 class ValidateSSHKeyResponse(BaseModel):
@@ -1068,8 +1088,8 @@ def validate_ssh_key(req: ValidateSSHKeyRequest,
 
 
 class UpdateSSHKeyRequest(BaseModel):
-    key_name: Optional[str] = None
-    public_key: Optional[str] = None
+    key_name: Optional[str] = Field(None, max_length=_MAX_NAME_LEN)
+    public_key: Optional[str] = Field(None, max_length=_MAX_PUBLIC_KEY_LEN)
 
 
 @router.put("/ssh-keys/{key_id}", response_model=SSHKeyResponse)

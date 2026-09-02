@@ -296,31 +296,40 @@ def create_user(
         db.refresh(user)
         return user, None
 
-    # Create personal project first
-    project = Project(name=_unique_project_name(db, f"{username}-personal"),
-                      description=f"Personal project for {username}")
-    db.add(project)
-    db.flush()  # get project.id without committing
-
-    # Create user linked to personal project
     user = User(
         username=username,
         name=name,
         email=email,
         hashed_password=hashed_password,
         global_role=global_role,
-        personal_project_id=project.id,
     )
     db.add(user)
     db.flush()
 
-    # Add user as admin of their personal project
-    access = UserProjectAccess(user_id=user.id, project_id=project.id, role="admin")
-    db.add(access)
+    plaintext_key = _provision_personal_project(db, user)
+    db.commit()
+    db.refresh(user)
+    return user, plaintext_key
+
+
+def _provision_personal_project(db: Session, user: User) -> str:
+    """
+    Give `user` a personal project and its first API key. The caller commits.
+
+    The project belongs to that one account and nobody else is added to it, so
+    each developer gets their own rather than sharing a common one.
+    """
+    project = Project(name=_unique_project_name(db, f"{user.username}-personal"),
+                      description=f"Personal project for {user.username}")
+    db.add(project)
+    db.flush()  # get project.id without committing
+
+    user.personal_project_id = project.id
+    db.add(UserProjectAccess(user_id=user.id, project_id=project.id, role="admin"))
 
     # Generate personal API key (unrestricted)
     plaintext_key = _generate_api_key()
-    api_key = APIKey(
+    db.add(APIKey(
         project_id=project.id,
         name="default",
         key_hash=_hash_key(plaintext_key),
@@ -329,11 +338,25 @@ def create_user(
         # recoverable form, so a lost one is replaced rather than revealed.
         key_ciphertext=_maybe_encrypt_api_key(plaintext_key, recoverable=False),
         allowed_models=["all"],
-    )
-    db.add(api_key)
+    ))
+    return plaintext_key
+
+
+def ensure_personal_project(db: Session, user: User) -> Optional[str]:
+    """
+    Give a developer account the personal project it should have.
+
+    Viewers are created without one, so promoting a viewer to user or admin has to
+    fill the gap: otherwise the account holds a developer role but has nowhere of
+    its own to keep keys. Returns the new plaintext API key, or None when the
+    account already had a personal project.
+    """
+    if user.personal_project_id is not None:
+        return None
+    plaintext_key = _provision_personal_project(db, user)
     db.commit()
     db.refresh(user)
-    return user, plaintext_key
+    return plaintext_key
 
 
 def deactivate_user(db: Session, user_id: int) -> bool:

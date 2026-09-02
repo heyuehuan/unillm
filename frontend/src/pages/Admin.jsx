@@ -43,8 +43,7 @@ function EditUserModal({ user, onClose, onSaved }) {
         password_login_disabled: form.password_login_disabled,
       }
       if (form.new_password) payload.new_password = form.new_password
-      await api.updateUser(user.id, payload)
-      onSaved()
+      onSaved(await api.updateUser(user.id, payload))
     } catch (e) { setError(e.message) } finally { setSaving(false) }
   }
 
@@ -139,7 +138,7 @@ function UsersTab({ currentUser }) {
           <div className="card-b">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600 }}>User <span className="mono">{justCreated.user.username}</span> created</div>
+                <div style={{ fontWeight: 600 }}>User <span className="mono">{justCreated.user.username}</span> {justCreated.action || 'created'}</div>
                 {justCreated.key ? (
                   <>
                     <div style={{ fontSize: 12.5, color: 'var(--text-2)', marginTop: 4 }}>Initial API key (shown once):</div>
@@ -162,7 +161,15 @@ function UsersTab({ currentUser }) {
         <EditUserModal
           user={editingUser}
           onClose={() => setEditingUser(null)}
-          onSaved={() => { setEditingUser(null); load() }}
+          onSaved={(updated) => {
+            setEditingUser(null)
+            // A promotion out of viewer creates the personal project and its first
+            // key server-side; that key is only ever returned here.
+            if (updated?.api_key) {
+              setJustCreated({ user: updated, key: updated.api_key, action: 'promoted — new personal project' })
+            }
+            load()
+          }}
         />
       )}
 

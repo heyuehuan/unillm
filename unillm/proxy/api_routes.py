@@ -588,7 +588,14 @@ class AdminUpdateUserRequest(BaseModel):
     active: Optional[bool] = None
 
 
-@router.put("/users/{user_id}", response_model=UserResponse)
+class AdminUpdateUserResponse(UserResponse):
+    # Set only when this update promoted a viewer, which provisions the personal
+    # project and first key the account would have been given at creation. Shown
+    # once, exactly like the key from creating a user.
+    api_key: Optional[str] = None
+
+
+@router.put("/users/{user_id}", response_model=AdminUpdateUserResponse)
 def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Request,
                       admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     if user_id == admin.id:
@@ -631,9 +638,20 @@ def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Reques
         target.token_version = (target.token_version or 0) + 1
     db.commit()
     db.refresh(target)
+
+    # A viewer is created with no personal project, so promoting one to a developer
+    # role has to provision it now — otherwise the account can hold no keys of its
+    # own and every "create a key" path has nowhere to put them.
+    plaintext_key = None
+    if target.global_role != "viewer":
+        plaintext_key = crud.ensure_personal_project(db, target)
+        if plaintext_key:
+            changes["personal_project_created"] = True
+
     _audit(db, "user_updated", request, user=admin,
            resource_type="user", resource_id=str(user_id), detail=changes)
-    return _user_response(target)
+    return AdminUpdateUserResponse(**_user_response(target).model_dump(),
+                                   api_key=plaintext_key)
 
 
 # ---------------------------------------------------------------------------

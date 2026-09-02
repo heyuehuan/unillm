@@ -532,6 +532,11 @@ function AuditTab() {
       })
       setLogs(res.items || [])
       setTotal(res.total || 0)
+      // A filter change (or a shrinking retention window) can leave the current page
+      // past the end of the results, which reads as "no logs found" with only Prev
+      // to get back. Land on the last page that exists instead.
+      const lastPage = Math.max(0, Math.ceil((res.total || 0) / LIMIT) - 1) * LIMIT
+      if (offset > lastPage) setOffset(lastPage)
     } catch (e) { setLoadError(e.message) } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [offset, severity, debouncedAction, userId])

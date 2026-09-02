@@ -151,7 +151,6 @@ export default function Models() {
       <div className="page-h">
         <div>
           <h1 className="page-title">Models</h1>
-          <div className="page-sub">All models seen through this proxy</div>
         </div>
       </div>
 

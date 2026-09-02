@@ -771,7 +771,6 @@ export default function Projects({ user, projectId = null, tab = null }) {
       <div className="page-h">
         <div>
           <h1 className="page-title">Projects</h1>
-          <div className="page-sub">Isolate keys and usage per workload</div>
         </div>
         <div className="h-actions">
           {/* Not admin-only: the list is scoped per user either way, and a member

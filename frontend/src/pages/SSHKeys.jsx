@@ -346,7 +346,6 @@ export default function SSHKeys({ user }) {
       <div className="page-h">
         <div>
           <h1 className="page-title">My SSH Keys</h1>
-          <div className="page-sub">SSH keys authenticate requests through this proxy</div>
         </div>
         <div className="h-actions">
           {keys.length > 0 && !showValidate && (

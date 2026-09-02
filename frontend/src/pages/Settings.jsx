@@ -55,7 +55,6 @@ export default function Settings({ user, theme, setTheme, onUserUpdated, onLogou
       <div className="page-h">
         <div>
           <h1 className="page-title">Settings</h1>
-          <div className="page-sub">Account preferences</div>
         </div>
       </div>
 

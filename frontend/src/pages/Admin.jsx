@@ -692,7 +692,6 @@ export default function Admin({ currentUser, tab = 'users' }) {
       <div className="page-h">
         <div>
           <h1 className="page-title">Admin</h1>
-          <div className="page-sub">User management, model pricing, server settings, and audit trail</div>
         </div>
       </div>
 

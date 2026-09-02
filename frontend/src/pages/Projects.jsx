@@ -36,6 +36,11 @@ function combineModels(selected, custom) {
   return all.length ? all : null
 }
 
+// How long a revealed key stays on screen. Revealing is deliberate, but leaving the
+// key there afterwards is not — an unattended screen or a shared one keeps showing a
+// live credential until someone thinks to press Hide.
+const REVEAL_TIMEOUT_MS = 60000
+
 function KeyRow({ k, models, onRevoke, onSaved, canManage, canReveal }) {
   const [revealed, setRevealed] = useState(null)
   const [revealing, setRevealing] = useState(false)
@@ -68,6 +73,12 @@ function KeyRow({ k, models, onRevoke, onSaved, canManage, canReveal }) {
     } catch (err) { setError(err.message) }
     finally { setSaving(false) }
   }
+
+  useEffect(() => {
+    if (!revealed) return
+    const t = setTimeout(() => setRevealed(null), REVEAL_TIMEOUT_MS)
+    return () => clearTimeout(t)
+  }, [revealed])
 
   async function reveal() {
     setRevealing(true)
@@ -167,6 +178,7 @@ function KeyRow({ k, models, onRevoke, onSaved, canManage, canReveal }) {
               <button className="btn sm" onClick={() => setRevealed(null)}>
                 <IcX size={12} /> Hide
               </button>
+              <span style={{ fontSize: 11.5, color: 'var(--text-3)' }}>Hides by itself in a minute</span>
             </div>
           </td>
         </tr>

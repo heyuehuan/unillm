@@ -58,3 +58,19 @@ litellm/*
 
 # Internal working documents
 docs-dev/
+docs/dev_logs/
+docs/plan/
+
+# Code review reports (keep them in docs-dev/ instead)
+review.md
+*_REVIEW.md
+*_review.md
+
+# AI coding-assistant config, instructions and memory
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.cursor/
+.aider*
+.mcp.json

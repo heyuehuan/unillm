@@ -15,6 +15,14 @@ function errorMessage(detail) {
   return ''
 }
 
+// Callers need to tell "the server said no" from "the server did not answer":
+// the first invalidates a session, the second is a blip that should be retried.
+// A rejected fetch (offline, DNS, TLS) has no status at all, which is the signal.
+function withStatus(error, status) {
+  error.status = status
+  return error
+}
+
 async function req(method, path, body) {
   const token = getToken()
   const res = await fetch(path, {
@@ -32,11 +40,14 @@ async function req(method, path, body) {
   if (res.status === 401 && token && path !== '/api/auth/login') {
     localStorage.removeItem('unillm_token')
     window.dispatchEvent(new CustomEvent('unillm:session-expired'))
-    throw new Error('Session expired — please sign in again')
+    throw withStatus(new Error('Session expired — please sign in again'), 401)
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(errorMessage(err.detail) || `Request failed (${res.status})`)
+    throw withStatus(
+      new Error(errorMessage(err.detail) || `Request failed (${res.status})`),
+      res.status,
+    )
   }
   if (res.status === 204) return null
   return res.json()

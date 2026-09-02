@@ -25,6 +25,7 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [sessionExpired, setSessionExpired] = useState(false)
+  const [authError, setAuthError] = useState('')
   const { parts, query } = useHashRoute()
   const route = parts[0] || 'dashboard'
 
@@ -56,13 +57,26 @@ export default function App() {
     return () => mq.removeEventListener('change', handler)
   }, [theme])
 
-  useEffect(() => {
+  // Load the signed-in user, both on first paint and straight after a login.
+  //
+  // Only the server actually rejecting the credentials ends the session. This used
+  // to clear the token on any failure at all, so a dropped connection or a 500
+  // signed the user out for good — the token was gone, and the next reload showed
+  // the login screen with no explanation. Anything else is reported and retryable.
+  function loadCurrentUser() {
     if (!api.hasToken()) { setAuthLoading(false); return }
+    setAuthLoading(true)
+    setAuthError('')
     api.me()
       .then(u => setUser(u))
-      .catch(() => api.clearToken())
+      .catch(e => {
+        if (e.status === 401 || e.status === 403) api.clearToken()
+        else setAuthError(e.message || 'Could not reach the server')
+      })
       .finally(() => setAuthLoading(false))
-  }, [])
+  }
+
+  useEffect(() => { loadCurrentUser() }, [])
 
   // Expired/invalidated token: drop to the login screen without a reload, so the
   // current hash route survives and the user returns where they left off.
@@ -82,13 +96,14 @@ export default function App() {
 
   function handleLogin() {
     setSessionExpired(false)
-    api.me().then(u => setUser(u))
+    loadCurrentUser()
   }
 
   function handleLogout() {
     api.clearToken()
     setUser(null)
     setSessionExpired(false)
+    setAuthError('')
     navigate('dashboard')
   }
 
@@ -96,6 +111,23 @@ export default function App() {
     return (
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', color: 'var(--text-3)' }}>
         Loading…
+      </div>
+    )
+  }
+
+  // A session we could not verify, rather than one that was rejected. The token is
+  // still here, so offer the retry before offering the sign-out.
+  if (!user && authError) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
+        <div style={{ maxWidth: 420, textAlign: 'center' }}>
+          <h2 style={{ marginBottom: 8 }}>Could not reach the server</h2>
+          <div className="hint" style={{ marginBottom: 16 }}>{authError}</div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+            <button className="btn primary" onClick={loadCurrentUser}>Try again</button>
+            <button className="btn" onClick={handleLogout}>Sign out</button>
+          </div>
+        </div>
       </div>
     )
   }

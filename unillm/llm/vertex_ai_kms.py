@@ -86,6 +86,24 @@ def _ensure_vertexai_initialized(
     return True
 
 
+def _bind_prediction_client(model: GenerativeModel) -> None:
+    """
+    Resolve a model's prediction client while the SDK still holds the config it was
+    built for.
+
+    The SDK exposes the client as a cached_property, so it is otherwise created on
+    the first generate_content call — by then another request may have re-inited
+    the global config, and the client would capture that one instead. Touching the
+    attribute here pins it. Only the sync client is warmed, because that is the one
+    both the blocking and the streaming path use. A missing attribute means an SDK
+    that names it differently — nothing to pin, not a failed request.
+    """
+    try:
+        model._prediction_client
+    except AttributeError:
+        pass
+
+
 class VertexAIKMSHandler:
     """
     Handler for Vertex AI Gemini API calls with CMEK support using the Vertex AI SDK.
@@ -120,10 +138,11 @@ class VertexAIKMSHandler:
         self.project = project
         self.location = location
         self.kms_key_name = kms_key_name
-        # Keyed by (model_name, system_instruction) so system-prompted requests are
-        # cached too instead of constructing a fresh model per request. Bounded:
-        # system prompts can be unique per request, and an unbounded cache would
-        # leak memory. Models are cheap to rebuild, so a full clear is fine.
+        # Keyed by the full config a model is bound to, not just its name: two KMS
+        # models can differ only in project or key, and an entry built under one
+        # config must never be handed to a request asking for another. Bounded
+        # because system prompts can be unique per request; models are cheap to
+        # rebuild, so a full clear is fine.
         self._models: Dict[tuple, GenerativeModel] = {}
         self._models_cache_max = 128
 
@@ -131,28 +150,37 @@ class VertexAIKMSHandler:
                    kms_key_name: Optional[str],
                    system_instruction: Optional[str] = None) -> GenerativeModel:
         """
-        Get or create a GenerativeModel, re-initializing the SDK if config changed.
+        Get or create a GenerativeModel bound to this request's Vertex config.
 
-        The check-init-construct sequence runs under the global lock so a concurrent
-        request for a different KMS config can't re-init between the config check
-        and the model construction.
+        vertexai.init() writes process-global state, and a GenerativeModel reads
+        that state twice: at construction, for the project and location baked into
+        its resource name, and again on first use, when its prediction client is
+        built and captures credentials and endpoint. Only the first happened under
+        the lock. A request for a different project could re-init in the gap, and
+        the model then built its client from the other request's configuration —
+        wrong project, wrong CMEK key, for the whole life of that cached model.
+
+        So the client is warmed here, inside the same critical section as the init
+        and the construction. Once warmed, an entry no longer consults the global
+        config at all, which is what makes it safe to keep entries for several
+        configs side by side rather than clearing the cache on every switch.
         """
-        cache_key = (model_name, system_instruction)
+        cache_key = (project, location, kms_key_name, model_name, system_instruction)
         with _global_vertexai_lock:
-            if _ensure_vertexai_initialized(project, location, kms_key_name):
-                # Global config changed — cached models were created under old config.
-                self._models.clear()
             model = self._models.get(cache_key)
-            if model is None:
-                if len(self._models) >= self._models_cache_max:
-                    self._models.clear()
-                model = (
-                    GenerativeModel(model_name, system_instruction=system_instruction)
-                    if system_instruction
-                    else GenerativeModel(model_name)
-                )
-                self._models[cache_key] = model
-                verbose_proxy_logger.debug(f"Created GenerativeModel for {cache_key}")
+            if model is not None:
+                return model
+            _ensure_vertexai_initialized(project, location, kms_key_name)
+            model = (
+                GenerativeModel(model_name, system_instruction=system_instruction)
+                if system_instruction
+                else GenerativeModel(model_name)
+            )
+            _bind_prediction_client(model)
+            if len(self._models) >= self._models_cache_max:
+                self._models.clear()
+            self._models[cache_key] = model
+            verbose_proxy_logger.debug(f"Created GenerativeModel for {cache_key}")
             return model
 
     def _convert_messages_to_contents(

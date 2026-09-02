@@ -52,6 +52,13 @@ from unillm.types import (
 )
 
 
+# How many streamed chunks may sit between the SDK's producer thread and the client
+# before the producer has to wait. Deep enough that a brief hiccup in the client does
+# not stall generation, shallow enough that a stalled client cannot make the proxy
+# hold a whole completion in memory.
+_STREAM_QUEUE_MAXSIZE = 64
+
+
 # vertexai.init() sets process-global state. Track what's currently initialized
 # so we only re-init when the config actually changes.
 _global_vertexai_lock = threading.Lock()
@@ -436,7 +443,11 @@ class VertexAIKMSHandler:
         background thread and bridge chunks to the async generator via a Queue.
         """
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+        # Bounded: the SDK iterator hands over chunks as fast as Vertex produces them,
+        # while the consumer only moves as fast as the client reads. Unbounded, a slow
+        # or stalled client made the proxy buffer the entire completion in memory, once
+        # per concurrent stream. Full, the producer thread parks in put() instead.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_STREAM_QUEUE_MAXSIZE)
         _sentinel = object()
         stop = threading.Event()  # set when the consumer goes away (e.g. client disconnect)
 
@@ -533,6 +544,11 @@ class VertexAIKMSHandler:
             # blocking join(30) could stall the whole loop for up to 30s when a
             # client disconnected mid-stream.
             stop.set()
+            # A producer parked on a full queue cannot see `stop` until its put()
+            # completes, so make room for it. What we discard is a chunk nobody is
+            # left to read.
+            while not queue.empty():
+                queue.get_nowait()
             await asyncio.to_thread(thread.join, 30)
 
         # One closing chunk per candidate, carrying the reason Vertex actually gave.

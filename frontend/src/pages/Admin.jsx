@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { navigate } from '../router.js'
 import { IcPlus, IcTrash, IcX, IcEdit, IcRefresh } from '../components/Icons.jsx'
 import { fmtDateTime, useConfirm, CopyButton } from '../components/ui.jsx'
+import { useLatestRequest, isAbort } from '../requests.js'
 
 const GLOBAL_ROLES = [
   { id: 'user', label: 'User', hint: 'Normal account — gets a personal project and API key' },
@@ -508,6 +509,7 @@ function AuditTab() {
   const [users, setUsers] = useState([])
   const [expanded, setExpanded] = useState(null)
   const LIMIT = 50
+  const requests = useLatestRequest()
 
   useEffect(() => {
     api.getUsers().then(setUsers).catch(() => {})
@@ -521,6 +523,7 @@ function AuditTab() {
   }, [action])
 
   async function load() {
+    const attempt = requests.next()
     setLoading(true)
     setLoadError('')
     try {
@@ -529,7 +532,7 @@ function AuditTab() {
         severity: severity || undefined,
         action: debouncedAction || undefined,
         user_id: userId || undefined,
-      })
+      }, { signal: attempt.signal })
       setLogs(res.items || [])
       setTotal(res.total || 0)
       // A filter change (or a shrinking retention window) can leave the current page
@@ -537,7 +540,11 @@ function AuditTab() {
       // to get back. Land on the last page that exists instead.
       const lastPage = Math.max(0, Math.ceil((res.total || 0) / LIMIT) - 1) * LIMIT
       if (offset > lastPage) setOffset(lastPage)
-    } catch (e) { setLoadError(e.message) } finally { setLoading(false) }
+    } catch (e) {
+      if (!isAbort(e)) setLoadError(e.message)
+    } finally {
+      if (requests.isCurrent(attempt)) setLoading(false)
+    }
   }
   useEffect(() => { load() }, [offset, severity, debouncedAction, userId])
 

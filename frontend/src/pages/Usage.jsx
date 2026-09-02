@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
+import { useLatestRequest, isAbort } from '../requests.js'
 import { BarChart } from '../components/Charts.jsx'
 import { IcZap, IcDollar, IcSliders, IcRefresh } from '../components/Icons.jsx'
 import FilterBar, { filtersToApiParams, describeFilters, ScopeToggle } from '../components/FilterBar.jsx'
@@ -10,23 +11,26 @@ export default function Usage({ user, filters, setFilters, scope, setScope }) {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [projects, setProjects] = useState([])
+  const requests = useLatestRequest()
 
   useEffect(() => {
     api.getProjects().then(setProjects).catch(() => {})
   }, [])
 
   async function load() {
+    const attempt = requests.next()
     setLoading(true)
     setLoadError('')
     try {
       const params = filtersToApiParams(filters)
       if (scope === 'mine') params.mine = 'true'
-      const st = await api.getStats(params)
+      const st = await api.getStats(params, { signal: attempt.signal })
       setStats(st)
     } catch (e) {
+      if (isAbort(e)) return
       setLoadError(e.message)
     } finally {
-      setLoading(false)
+      if (requests.isCurrent(attempt)) setLoading(false)
     }
   }
 

@@ -23,7 +23,10 @@ function withStatus(error, status) {
   return error
 }
 
-async function req(method, path, body) {
+// `opts.signal` lets a caller drop a request it no longer wants — a filter the user
+// has already changed, or a page they have navigated away from. Without it a slow
+// earlier response could still land and overwrite the newer one.
+async function req(method, path, body, opts = {}) {
   const token = getToken()
   const res = await fetch(path, {
     method,
@@ -32,6 +35,7 @@ async function req(method, path, body) {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: opts.signal,
   })
   // Session expiry: only treat it as a stale session when we actually had a token.
   // A 401 from the login call itself must surface as an error so the login form
@@ -108,9 +112,9 @@ export const api = {
 
   getModels: () => req('GET', '/api/models'),
 
-  getStats: (params) => req('GET', `/api/logs/stats${qs(params)}`),
-  getRequests: (params) => req('GET', `/api/logs/requests${qs(params)}`),
-  getAudit: (params) => req('GET', `/api/logs/audit${qs(params)}`),
+  getStats: (params, opts) => req('GET', `/api/logs/stats${qs(params)}`, undefined, opts),
+  getRequests: (params, opts) => req('GET', `/api/logs/requests${qs(params)}`, undefined, opts),
+  getAudit: (params, opts) => req('GET', `/api/logs/audit${qs(params)}`, undefined, opts),
 
   getSettings: () => req('GET', '/api/settings'),
   updateSetting: (key, value) => req('PUT', `/api/settings/${encodeURIComponent(key)}`, { value }),

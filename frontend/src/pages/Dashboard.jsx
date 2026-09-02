@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
+import { useLatestRequest, isAbort } from '../requests.js'
 import { navigate } from '../router.js'
 import { BarChart } from '../components/Charts.jsx'
 import { IcZap, IcDollar, IcSliders, IcRefresh, IcChevRight } from '../components/Icons.jsx'
@@ -27,27 +28,30 @@ export default function Dashboard({ user, filters, setFilters, scope, setScope }
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [projects, setProjects] = useState([])
+  const requests = useLatestRequest()
 
   useEffect(() => {
     api.getProjects().then(setProjects).catch(() => {})
   }, [])
 
   async function load() {
+    const attempt = requests.next()
     setLoading(true)
     setLoadError('')
     const p = filtersToApiParams(filters)
     if (scope === 'mine') p.mine = 'true'
     try {
       const [s, r] = await Promise.all([
-        api.getStats(p),
-        api.getRequests({ limit: 8, ...p }),
+        api.getStats(p, { signal: attempt.signal }),
+        api.getRequests({ limit: 8, ...p }, { signal: attempt.signal }),
       ])
       setStats(s)
       setRecent(r.items || [])
     } catch (e) {
+      if (isAbort(e)) return
       setLoadError(e.message)
     } finally {
-      setLoading(false)
+      if (requests.isCurrent(attempt)) setLoading(false)
     }
   }
 

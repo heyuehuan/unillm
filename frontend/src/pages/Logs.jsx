@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { api } from '../api.js'
 import { IcRefresh, IcX, IcSearch } from '../components/Icons.jsx'
 import FilterBar, { filtersToApiParams, ScopeToggle } from '../components/FilterBar.jsx'
+import { useLatestRequest, isAbort } from '../requests.js'
 import { HttpBadge, fmtDateTime, LoadError } from '../components/ui.jsx'
 
 function DetailPanel({ log, onClose }) {
@@ -63,6 +64,7 @@ export default function Logs({ user, filters, setFilters, scope, setScope, selec
   const [projects, setProjects] = useState([])
   const [seenStatuses, setSeenStatuses] = useState([])
   const LIMIT = 50
+  const requests = useLatestRequest()
 
   useEffect(() => {
     api.getProjects().then(setProjects).catch(() => {})
@@ -81,6 +83,7 @@ export default function Logs({ user, filters, setFilters, scope, setScope, selec
   }, [model])
 
   async function load() {
+    const attempt = requests.next()
     setLoading(true)
     setLoadError('')
     const p = filtersToApiParams(filters)
@@ -93,10 +96,10 @@ export default function Logs({ user, filters, setFilters, scope, setScope, selec
           model: debouncedModel || undefined,
           status_code: statusFilter || undefined,
           ...p,
-        }),
+        }, { signal: attempt.signal }),
         // Status codes present in the current (status-unfiltered) selection,
         // so the dropdown only offers codes that actually exist.
-        api.getStats(p).catch(() => null),
+        api.getStats(p, { signal: attempt.signal }).catch(() => null),
       ])
       setLogs(res.items || [])
       setTotal(res.total || 0)
@@ -107,11 +110,12 @@ export default function Logs({ user, filters, setFilters, scope, setScope, selec
       if (offset > lastPage) setOffset(lastPage)
       if (stats?.by_status) setSeenStatuses(Object.keys(stats.by_status).map(Number).sort((a, b) => a - b))
     } catch (e) {
+      if (isAbort(e)) return          // a newer load is already on its way
       setLoadError(e.message)
       setLogs([])
       setTotal(0)
     } finally {
-      setLoading(false)
+      if (requests.isCurrent(attempt)) setLoading(false)
     }
   }
 

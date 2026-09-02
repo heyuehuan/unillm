@@ -4,9 +4,10 @@
   <meta charset="utf-8" />
   <title>unillm</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- No web fonts: the console is served from the proxy itself and often runs on
+       an isolated network, where a Google Fonts stylesheet either hangs the page
+       load or tells a third party who is using the console and when. The styles
+       use the operating system's own UI and monospace faces instead. -->
 </head>
 <body>
   <div id="root"></div>

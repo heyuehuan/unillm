@@ -50,6 +50,7 @@ from unillm.types import (
 from unillm.llm.vertex_ai import VertexAIHandler
 from unillm.llm.vertex_ai_kms import VertexAIKMSHandler
 from unillm.llm.vllm import VLLMHandler
+from unillm.llm.messages import InvalidRequestError
 from unillm.llm.params import (
     UnsupportedParamsError,
     enabled_optional_params,
@@ -520,6 +521,8 @@ def _upstream_status(exc: Exception) -> int:
     """HTTP status to record for an upstream failure."""
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code
+    if isinstance(exc, InvalidRequestError):
+        return 400
     return 500
 
 
@@ -532,6 +535,10 @@ def _sanitized_http_exception(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Upstream model provider error")
     if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
         return HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Upstream model provider unavailable")
+    if isinstance(exc, InvalidRequestError):
+        # Raised while converting the request, before anything was sent. The message
+        # is ours, describes what the caller sent, and leaks nothing internal.
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
 
 

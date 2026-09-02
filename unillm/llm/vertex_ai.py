@@ -19,6 +19,7 @@ from google.auth.credentials import Credentials
 
 from unillm._logging import verbose_proxy_logger
 from unillm.llm import finish_reasons
+from unillm.llm.messages import parse_image_data_url
 from unillm.llm.params import CHAT_LOGPROB_PARAMS
 from unillm.types import (
     ChatCompletionResponse,
@@ -137,19 +138,13 @@ class VertexAIHandler:
                         if item.get("type") == "text":
                             parts.append({"text": item.get("text", "")})
                         elif item.get("type") == "image_url":
-                            # Handle image content
-                            image_url = item.get("image_url", {})
-                            url = image_url.get("url", "") if isinstance(image_url, dict) else ""
-                            if url.startswith("data:"):
-                                # Base64 encoded image
-                                mime_type, base64_data = url.split(";base64,")
-                                mime_type = mime_type.replace("data:", "")
-                                parts.append({
-                                    "inline_data": {
-                                        "mime_type": mime_type,
-                                        "data": base64_data
-                                    }
-                                })
+                            image = parse_image_data_url(item.get("image_url", {}))
+                            parts.append({
+                                "inline_data": {
+                                    "mime_type": image.mime_type,
+                                    "data": image.base64_data,
+                                }
+                            })
                     else:
                         parts.append({"text": str(item)})
             

@@ -37,6 +37,7 @@ from vertexai.generative_models import GenerativeModel, Content, Part
 
 from unillm._logging import verbose_proxy_logger
 from unillm.llm import finish_reasons
+from unillm.llm.messages import parse_image_data_url
 from unillm.llm.params import CHAT_LOGPROB_PARAMS
 from unillm.types import (
     ChatCompletionResponse,
@@ -215,8 +216,9 @@ class VertexAIKMSHandler:
                         if item.get("type") == "text":
                             parts.append(Part.from_text(item.get("text", "")))
                         elif item.get("type") == "image_url":
-                            # TODO: Add proper image handling
-                            pass
+                            image = parse_image_data_url(item.get("image_url", {}))
+                            parts.append(Part.from_data(data=image.data,
+                                                        mime_type=image.mime_type))
                     else:
                         parts.append(Part.from_text(str(item)))
 

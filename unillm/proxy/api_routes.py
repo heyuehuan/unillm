@@ -924,8 +924,17 @@ def create_api_key(
     role = crud.get_user_project_role(db, current_user.id, project_id)
     if role != "admin" and current_user.global_role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
-    if not crud.get_project_by_id(db, project_id):
+    project = crud.get_project_by_id(db, project_id)
+    if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if project.archived:
+        # The proxy refuses every request from an archived project's keys, so a key
+        # minted here would be dead on arrival — and its owner would only find that
+        # out at the first call.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This project is archived. Restore it before creating keys.",
+        )
     if req.recoverable and not recoverable_keys_allowed():
         # Fail loudly. Silently creating a show-once key would leave the caller
         # believing they can retrieve it later, and they would find out only after

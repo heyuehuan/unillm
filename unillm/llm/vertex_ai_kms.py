@@ -391,10 +391,12 @@ class VertexAIKMSHandler:
             top_logprobs=top_logprobs,
         )
 
-        verbose_proxy_logger.debug(f"Vertex AI KMS request for model: {model}")
-        verbose_proxy_logger.debug(f"System instruction: {system_instruction}")
-        verbose_proxy_logger.debug(f"Contents count: {len(contents)}")
-        verbose_proxy_logger.debug(f"Generation config: {generation_config}")
+        # Shape only, never content: the system instruction is caller-supplied text
+        # and debug logs are ordinary files that get shipped and retained.
+        verbose_proxy_logger.debug(
+            "Vertex AI KMS request: model=%s, %d contents, system_instruction=%s, config=%s",
+            model, len(contents), bool(system_instruction), sorted(generation_config),
+        )
 
         # Off the event loop: on a cache miss this takes a process-wide lock, may
         # call vertexai.init(), and builds a gRPC prediction client. Inline, one

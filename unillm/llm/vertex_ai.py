@@ -345,8 +345,16 @@ class VertexAIHandler:
 
         client = await self._get_http_client()
 
+        # Shape only, never content: debug logs land in ordinary log files that are
+        # shipped and retained, and the request body is the caller's prompt.
         verbose_proxy_logger.debug(f"Vertex AI request URL: {url}")
-        verbose_proxy_logger.debug(f"Vertex AI request body: {json.dumps(request_body)[:500]}...")
+        verbose_proxy_logger.debug(
+            "Vertex AI request: %d contents, system_instruction=%s, config=%s, bytes=%d",
+            len(request_body.get("contents", [])),
+            bool(request_body.get("systemInstruction") or request_body.get("system_instruction")),
+            sorted(request_body.get("generationConfig", {})),
+            len(json.dumps(request_body)),
+        )
 
         if stream:
             return self._stream_response(client, url, headers, request_body, model)

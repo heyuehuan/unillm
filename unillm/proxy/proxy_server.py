@@ -563,6 +563,46 @@ def _write_request_log(model: str, prompt_tokens: int, completion_tokens: int, *
         db.close()
 
 
+def _request_loggers(background_tasks: BackgroundTasks, model: str,
+                     log_fields: Dict[str, Any], start_time: float):
+    """
+    The two ways an endpoint records a request. They differ in *when* they write.
+
+    A served request defers its row to a background task: writing opens a session and
+    reads the pricing table, and none of that has to happen before the caller gets
+    their response.
+
+    A failed one cannot defer. Background tasks are attached to the response the
+    endpoint returns, so when it raises an HTTPException instead, FastAPI's handler
+    builds a fresh response and the queued task is dropped on the floor. That left
+    every rejected request — bad parameter, over-budget logprobs, upstream outage —
+    absent from the log that exists to explain exactly those. Failures write inline
+    instead: off the event loop, and shielded so a client disconnecting mid-failure
+    still leaves the row behind.
+
+    Both read `log_fields` at call time, so a caller may fill in the backend fields
+    once the model has resolved.
+    """
+    def _fields(status_code: int, prompt_tokens: int, completion_tokens: int,
+                error_message: Optional[str]) -> Dict[str, Any]:
+        return dict(
+            model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            status_code=status_code, error_message=error_message,
+            latency_ms=int((time.time() - start_time) * 1000),
+            **log_fields,
+        )
+
+    def log_success(prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        background_tasks.add_task(
+            _write_request_log, **_fields(200, prompt_tokens, completion_tokens, None))
+
+    async def log_failure(status_code: int, error_message: Optional[str] = None) -> None:
+        await asyncio.shield(asyncio.to_thread(
+            _write_request_log, **_fields(status_code, 0, 0, error_message)))
+
+    return log_success, log_failure
+
+
 async def _prime_stream(stream):
     """
     Await the first chunk of an upstream stream before the response starts.
@@ -806,26 +846,30 @@ async def chat_completions(
     presence_penalty = request_body.presence_penalty
     frequency_penalty = request_body.frequency_penalty
 
-    enforce_model_access(user_api_key_dict, model)
+    # Assembled before the request may be refused. A key reaching for a model it is
+    # not allowed, or for one that isn't configured, is precisely the traffic an
+    # operator needs to see, and it used to leave no trace anywhere. The backend
+    # fields stay empty: such a request never resolves to a backend.
+    log_fields = _base_log_fields(request_id, user_api_key_dict, ip_address,
+                                  backend_model=None, model_type=None,
+                                  stream=stream, labels=labels)
+    _log_success, _log_failure = _request_loggers(background_tasks, model, log_fields, start_time)
 
-    handler = _get_handler_for_model(model)
+    try:
+        # Access before existence, so a key that may not use a model cannot learn
+        # from the status code whether it is configured.
+        enforce_model_access(user_api_key_dict, model)
+        handler = _get_handler_for_model(model)
+    except HTTPException as e:
+        await _log_failure(e.status_code, str(e.detail))
+        raise
+
     actual_model = _get_actual_model_name(model)
     model_params = _get_model_params(model)
     model_type = _get_model_type(model)
+    log_fields.update(backend_model=actual_model, model_type=model_type)
 
     verbose_proxy_logger.debug(f"Chat completion request_id={request_id} model={model} -> {actual_model}")
-
-    log_fields = _base_log_fields(request_id, user_api_key_dict, ip_address,
-                                  actual_model, model_type, stream, labels)
-
-    def _log(status_code: int, prompt_tokens: int = 0, completion_tokens: int = 0, error_message: Optional[str] = None):
-        background_tasks.add_task(
-            _write_request_log,
-            model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            status_code=status_code, error_message=error_message,
-            latency_ms=int((time.time() - start_time) * 1000),
-            **log_fields,
-        )
 
     # Only params the client actually asked for are candidates for rejection. An
     # explicit `logprobs: false` is a request for *no* logprobs, so it must not fail
@@ -842,7 +886,7 @@ async def chat_completions(
             model=model, backend_model=actual_model, model_type=model_type,
         )
     except UnsupportedParamsError as e:
-        _log(status_code=400, error_message=e.message)
+        await _log_failure(400, e.message)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=_client_unsupported_params_detail(model, e),
@@ -854,7 +898,7 @@ async def chat_completions(
     plan = await _logprobs_response_plan(request_body, max_tokens, request_body.top_logprobs,
                                          sent_params=optional_params)
     if plan.rejection:
-        _log(status_code=413, error_message=plan.rejection)
+        await _log_failure(413, plan.rejection)
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             detail=plan.rejection)
 
@@ -909,7 +953,7 @@ async def chat_completions(
         usage = response.usage
         prompt_tokens = usage.prompt_tokens if usage else 0
         completion_tokens = usage.completion_tokens if usage else 0
-        _log(status_code=200, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+        _log_success(prompt_tokens, completion_tokens)
 
         response_dict = response.model_dump()
         if user_api_key_dict.ssh_username:
@@ -918,10 +962,11 @@ async def chat_completions(
             response_dict["warning"] = user_api_key_dict.ssh_warning
         return response_dict
 
-    except HTTPException:
+    except HTTPException as e:
+        await _log_failure(e.status_code, str(e.detail))
         raise
     except Exception as e:
-        _log(status_code=_upstream_status(e), error_message=str(e))
+        await _log_failure(_upstream_status(e), str(e))
         verbose_proxy_logger.exception(f"Error in chat completion request_id={request_id}: {e}")
         raise _sanitized_http_exception(e)
 
@@ -956,26 +1001,30 @@ async def completions(
     presence_penalty = request_body.presence_penalty
     frequency_penalty = request_body.frequency_penalty
 
-    enforce_model_access(user_api_key_dict, model)
+    # Assembled before the request may be refused. A key reaching for a model it is
+    # not allowed, or for one that isn't configured, is precisely the traffic an
+    # operator needs to see, and it used to leave no trace anywhere. The backend
+    # fields stay empty: such a request never resolves to a backend.
+    log_fields = _base_log_fields(request_id, user_api_key_dict, ip_address,
+                                  backend_model=None, model_type=None,
+                                  stream=stream, labels=None)
+    _log_success, _log_failure = _request_loggers(background_tasks, model, log_fields, start_time)
 
-    handler = _get_handler_for_model(model)
+    try:
+        # Access before existence, so a key that may not use a model cannot learn
+        # from the status code whether it is configured.
+        enforce_model_access(user_api_key_dict, model)
+        handler = _get_handler_for_model(model)
+    except HTTPException as e:
+        await _log_failure(e.status_code, str(e.detail))
+        raise
+
     actual_model = _get_actual_model_name(model)
     model_params = _get_model_params(model)
     model_type = _get_model_type(model)
+    log_fields.update(backend_model=actual_model, model_type=model_type)
 
     verbose_proxy_logger.debug(f"Text completion request_id={request_id} model={model} -> {actual_model}")
-
-    log_fields = _base_log_fields(request_id, user_api_key_dict, ip_address,
-                                  actual_model, model_type, stream, labels=None)
-
-    def _log(status_code: int, prompt_tokens: int = 0, completion_tokens: int = 0, error_message: Optional[str] = None):
-        background_tasks.add_task(
-            _write_request_log,
-            model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            status_code=status_code, error_message=error_message,
-            latency_ms=int((time.time() - start_time) * 1000),
-            **log_fields,
-        )
 
     requested_optional = (
         {"logprobs": request_body.logprobs} if request_body.logprobs is not None else {}
@@ -986,7 +1035,7 @@ async def completions(
             model=model, backend_model=actual_model, model_type=model_type, text=True,
         )
     except UnsupportedParamsError as e:
-        _log(status_code=400, error_message=e.message)
+        await _log_failure(400, e.message)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=_client_unsupported_params_detail(model, e),
@@ -996,7 +1045,7 @@ async def completions(
     plan = await _logprobs_response_plan(request_body, max_tokens, request_body.logprobs,
                                          wire_format=COMPACT_FORMAT, sent_params=optional_params)
     if plan.rejection:
-        _log(status_code=413, error_message=plan.rejection)
+        await _log_failure(413, plan.rejection)
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             detail=plan.rejection)
 
@@ -1044,7 +1093,7 @@ async def completions(
         usage = response.usage
         prompt_tokens = usage.prompt_tokens if usage else 0
         completion_tokens = usage.completion_tokens if usage else 0
-        _log(status_code=200, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+        _log_success(prompt_tokens, completion_tokens)
 
         response_dict = response.model_dump()
         if user_api_key_dict.ssh_username:
@@ -1053,10 +1102,11 @@ async def completions(
             response_dict["warning"] = user_api_key_dict.ssh_warning
         return response_dict
 
-    except HTTPException:
+    except HTTPException as e:
+        await _log_failure(e.status_code, str(e.detail))
         raise
     except Exception as e:
-        _log(status_code=_upstream_status(e), error_message=str(e))
+        await _log_failure(_upstream_status(e), str(e))
         verbose_proxy_logger.exception(f"Error in text completion request_id={request_id}: {e}")
         raise _sanitized_http_exception(e)
 

@@ -11,6 +11,8 @@ Auth order:
 SSH verification runs on top of key auth when ssh_required is configured.
 """
 
+import hashlib
+import hmac
 import os
 from typing import Dict, List, Optional
 
@@ -74,6 +76,35 @@ def get_env_allowed_keys() -> set:
     if api_keys_str:
         allowed.update(k.strip() for k in api_keys_str.split(",") if k.strip())
     return allowed
+
+
+def _matches_any_env_key(candidate: str, allowed: set) -> bool:
+    """
+    Compare a presented key against the configured ones without leaking timing.
+
+    `candidate in allowed` hashes the string and compares byte by byte, bailing at
+    the first difference, which lets an attacker who can time the response recover
+    the key one character at a time. compare_digest takes the same time whatever
+    the input, and the loop deliberately does not stop early so the answer does not
+    depend on which key matched.
+    """
+    matched = False
+    for key in allowed:
+        matched |= hmac.compare_digest(candidate, key)
+    return matched
+
+
+def _key_fingerprint(api_key: str) -> str:
+    """
+    A short, non-reversible tag for a key, safe to write to a log.
+
+    The leading characters of a rejected key used to go into the log at WARNING.
+    That is a fragment of somebody's secret sitting in a file with much weaker
+    access control than the key store, and an attacker who can read logs gets a
+    head start on the rest. A hash identifies the key across log lines without
+    carrying any of it.
+    """
+    return hashlib.sha256(api_key.encode()).hexdigest()[:12]
 
 
 def _check_model_access(allowed_models: Optional[List[str]], requested_model: str) -> bool:
@@ -144,10 +175,14 @@ async def user_api_key_auth(
     # --- 2. Env var fallback ---
     env_keys = get_env_allowed_keys()
     if env_keys:
-        if original_api_key not in env_keys:
-            verbose_proxy_logger.warning(f"Invalid API key: {original_api_key[:8]}...")
+        if not _matches_any_env_key(original_api_key, env_keys):
+            verbose_proxy_logger.warning(
+                f"Invalid API key (fingerprint {_key_fingerprint(original_api_key)})"
+            )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
-        verbose_proxy_logger.debug(f"API key authenticated via env var: {original_api_key[:8]}...")
+        verbose_proxy_logger.debug(
+            f"API key authenticated via env var (fingerprint {_key_fingerprint(original_api_key)})"
+        )
         auth_result = UserAPIKeyAuth(api_key=original_api_key, valid=True)
         return await _apply_ssh(api_key, ssh_mode, auth_result, db)
 

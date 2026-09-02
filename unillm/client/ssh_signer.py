@@ -28,6 +28,7 @@ import base64
 import getpass
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -238,12 +239,33 @@ def _sign_message(private_key, message: bytes) -> bytes:
     return signature
 
 
+# Marker for "--password was given with no value", meaning "ask me".
+_PROMPT = object()
+
+
+def _resolve_password(args, parser) -> Optional[str]:
+    """Work out the private key password without it ever appearing in argv."""
+    if args.password_env:
+        value = os.environ.get(args.password_env)
+        if value is None:
+            parser.error(f"environment variable {args.password_env} is not set")
+        return value
+    if args.password is _PROMPT:
+        return getpass.getpass("Private key password: ")
+    if args.password is not None:
+        print("Warning: a password passed on the command line is visible in 'ps' and "
+              "your shell history. Use --password with no value, or --password-env.",
+              file=sys.stderr)
+    return args.password
+
+
 def sign_api_key(
     api_key: str,
     key_name: Optional[str] = None,
     private_key_path: Optional[str] = None,
     password: Optional[str] = None,
     verbose: bool = False,
+    prompt_for_password: bool = False,
 ) -> SignedAPIKey:
     """
     Sign an API key with an SSH private key.
@@ -255,6 +277,8 @@ def sign_api_key(
         private_key_path: Optional path to private key. If None, searches common locations.
         password: Optional password for encrypted private keys
         verbose: If True, print information about key discovery
+        prompt_for_password: If True, ask for the password on the terminal when the
+            key turns out to be encrypted and no password was supplied
         
     Returns:
         SignedAPIKey object with the signed key
@@ -309,7 +333,18 @@ def sign_api_key(
     try:
         private_key = _load_private_key(private_key_path, password_bytes)
     except Exception as e:
-        raise ValueError(f"Failed to load private key: {e}")
+        # An encrypted key with no password reaches here. Asking for it on the
+        # terminal keeps the passphrase out of the process list and the shell
+        # history, which is the whole reason not to pass it as an argument.
+        if (prompt_for_password and password_bytes is None
+                and not isinstance(e, FileNotFoundError)):
+            entered = getpass.getpass(f"Password for {private_key_path}: ")
+            try:
+                private_key = _load_private_key(private_key_path, entered.encode() or None)
+            except Exception as retry_error:
+                raise ValueError(f"Failed to load private key: {retry_error}")
+        else:
+            raise ValueError(f"Failed to load private key: {e}")
     
     # Sign the API key
     try:
@@ -328,10 +363,10 @@ def sign_api_key(
     )
 
 
-def main():
-    """Command-line interface for signing API keys."""
+def _build_parser():
+    """The command-line interface, split out so tests can parse argv directly."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Sign an API key with your SSH private key for UniLLM authentication",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -367,7 +402,19 @@ Examples:
     )
     parser.add_argument(
         "--password", "-p",
-        help="Password for encrypted private key"
+        nargs="?",
+        const=_PROMPT,
+        default=None,
+        metavar="PASSWORD",
+        help="Password for an encrypted private key. Pass the flag with no value to "
+             "be prompted instead — a password given on the command line is visible "
+             "to every process on the machine via 'ps' and is saved in your shell "
+             "history."
+    )
+    parser.add_argument(
+        "--password-env",
+        metavar="VAR",
+        help="Read the private key password from this environment variable"
     )
     parser.add_argument(
         "--list-keys", "-l",
@@ -386,8 +433,14 @@ Examples:
         help="Output format (default: full)"
     )
     
+    return parser
+
+
+def main():
+    """Command-line interface for signing API keys."""
+    parser = _build_parser()
     args = parser.parse_args()
-    
+
     # Handle --list-keys
     if args.list_keys:
         found_keys = find_ssh_private_keys()
@@ -412,8 +465,9 @@ Examples:
             api_key=args.api_key,
             key_name=args.key_name,
             private_key_path=args.private_key,
-            password=args.password,
+            password=_resolve_password(args, parser),
             verbose=args.verbose,
+            prompt_for_password=True,
         )
         
         if args.output == "full":
@@ -431,10 +485,10 @@ Examples:
             }, indent=2))
             
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=__import__("sys").stderr)
+        print(f"Error: {e}", file=sys.stderr)
         exit(1)
     except ValueError as e:
-        print(f"Error: {e}", file=__import__("sys").stderr)
+        print(f"Error: {e}", file=sys.stderr)
         exit(1)
 
 

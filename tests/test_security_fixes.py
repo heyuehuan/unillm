@@ -195,3 +195,34 @@ def test_reveal_requires_admin_and_is_audited(client, admin_token, project_and_k
     # Audit trail recorded the reveal.
     rows, _total = crud.query_audit_logs(db, action="api_key_revealed")
     assert any(row.resource_id == str(key_id) for row in rows)
+
+
+# --- audit trail durability ----------------------------------------------------------
+
+def test_failed_login_is_recorded_in_the_audit_trail(client, db):
+    """
+    Audits used to be scheduled as FastAPI background tasks, which are attached to
+    the response the endpoint returns — so every audit followed by `raise` was
+    dropped, and the trail contained no failure events at all. Brute-force
+    detection depends on exactly those rows.
+    """
+    before, _ = crud.query_audit_logs(db, action="login_failure")
+    r = client.post("/api/auth/login", json={"username": "no-such-user", "password": "wrong"})
+    assert r.status_code == 401
+    after, _ = crud.query_audit_logs(db, action="login_failure")
+    assert len(after) == len(before) + 1
+    assert after[0].detail["username"] == "no-such-user"
+    assert after[0].severity == "warning"
+
+
+def test_disabled_account_login_attempt_is_audited(client, db, admin_token):
+    client.post("/api/users", json={"username": "audit-disabled", "password": "disabled123"},
+                headers=_auth(admin_token))
+    user_id = [u["id"] for u in client.get("/api/users", headers=_auth(admin_token)).json()
+               if u["username"] == "audit-disabled"][0]
+    client.put(f"/api/users/{user_id}", json={"active": False}, headers=_auth(admin_token))
+
+    r = client.post("/api/auth/login", json={"username": "audit-disabled", "password": "disabled123"})
+    assert r.status_code == 403
+    rows, _ = crud.query_audit_logs(db, action="login_failure")
+    assert any(row.detail.get("reason") == "account_disabled" for row in rows)

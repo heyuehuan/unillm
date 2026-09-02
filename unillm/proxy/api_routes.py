@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import bcrypt as _bcrypt
 import jwt
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +20,7 @@ from unillm.config import get_jwt_secret
 from unillm.db import get_db
 from unillm.db import crud
 from unillm.db.models import APIKey, Project, User
+from unillm.proxy import ratelimit
 
 router = APIRouter(prefix="/api", tags=["management"])
 
@@ -290,18 +291,7 @@ def _user_response(u) -> UserResponse:
                         created_at=u.created_at)
 
 
-def _write_audit_log(**kwargs):
-    """Run an audit write on its own session (background tasks outlive the request session)."""
-    from unillm.db.database import SessionLocal
-    db = SessionLocal()
-    try:
-        crud.create_audit_log(db=db, **kwargs)
-    finally:
-        db.close()
-
-
 def _audit(
-    background_tasks: BackgroundTasks,
     db: Session,
     action: str,
     request: Request,
@@ -311,19 +301,30 @@ def _audit(
     resource_id: Optional[str] = None,
     detail: Optional[Dict[str, Any]] = None,
 ):
-    """Schedule an audit log write as a background task (on a fresh DB session)."""
-    ip = _client_ip(request)
-    ua = request.headers.get("user-agent")
-    background_tasks.add_task(
-        _write_audit_log,
+    """
+    Append a row to the audit trail, synchronously, on the request's own session.
+
+    This used to be scheduled as a FastAPI background task. Background tasks are
+    attached to the response the endpoint returns, so any audit followed by a
+    `raise HTTPException` was silently discarded — which meant every failure event,
+    including every failed login, was missing from the trail. A security audit log
+    that drops exactly the events worth auditing is worse than none, so the write
+    now happens inline.
+
+    Callers commit their own changes before auditing, so the commit here only ever
+    persists the audit row. Failing to record an audit entry deliberately fails the
+    request rather than passing silently.
+    """
+    crud.create_audit_log(
+        db=db,
         action=action,
         severity=severity,
         user_id=user.id if user else None,
         username=user.username if user else None,
         resource_type=resource_type,
         resource_id=resource_id,
-        ip_address=ip,
-        user_agent=ua,
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
         detail=detail,
     )
 
@@ -332,25 +333,51 @@ def _audit(
 # Auth
 # ---------------------------------------------------------------------------
 
+def _login_key(username: str) -> str:
+    """Normalized key for the per-username failure counter."""
+    return (username or "").strip().lower()
+
+
 @router.post("/auth/login", response_model=TokenResponse)
-def login(req: LoginRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    # Throttle before doing any work. Checking first means a blocked caller cannot
+    # spend the server's bcrypt CPU, and the decision does not depend on whether the
+    # username exists — so this adds no enumeration signal.
+    ip = _client_ip(request)
+    user_key = _login_key(req.username)
+    retry_after = ratelimit.login_ip_limiter.hit(ip)
+    if retry_after is None:
+        retry_after = ratelimit.login_user_limiter.check(user_key)
+    if retry_after is not None:
+        _audit(db, "login_rate_limited", request, severity="warning",
+               detail={"username": req.username})
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please wait and try again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = crud.get_user_by_username(db, req.username)
     # Always run a bcrypt verification (against a dummy hash when the user is unknown)
     # so the response time does not reveal whether the username exists.
     password_ok = _verify_password(req.password, user.hashed_password if user else _DUMMY_PASSWORD_HASH)
     if not user or not password_ok:
-        _audit(background_tasks, db, "login_failure", request, severity="warning",
+        ratelimit.login_user_limiter.record(user_key)
+        _audit(db, "login_failure", request, severity="warning",
                detail={"username": req.username})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.active:
-        _audit(background_tasks, db, "login_failure", request, severity="warning",
+        _audit(db, "login_failure", request, severity="warning",
                detail={"username": req.username, "reason": "account_disabled"})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been disabled")
     if user.password_login_disabled:
-        _audit(background_tasks, db, "login_failure", request, severity="warning",
+        _audit(db, "login_failure", request, severity="warning",
                detail={"username": req.username, "reason": "password_login_disabled"})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password login is disabled for this account")
-    _audit(background_tasks, db, "login_success", request, user=user)
+    # Genuine owner proved themselves — drop the failure history so a burst of
+    # typos does not keep throttling them.
+    ratelimit.login_user_limiter.reset(user_key)
+    _audit(db, "login_success", request, user=user)
     return TokenResponse(access_token=_create_token(user))
 
 
@@ -385,7 +412,6 @@ def get_me(current_user: User = Depends(get_current_user)):
 def update_me(
     req: UpdateMeRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -414,7 +440,7 @@ def update_me(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This email is already in use")
         db.refresh(current_user)
         action = "password_changed" if changes.get("password_changed") else "profile_updated"
-        _audit(background_tasks, db, action, request, user=current_user,
+        _audit(db, action, request, user=current_user,
                resource_type="user", resource_id=str(current_user.id),
                detail={k: v for k, v in changes.items() if k != "password_changed"} or None)
         if changes.get("password_changed"):
@@ -428,8 +454,7 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)):
 
 
 @router.post("/users", response_model=CreateUserResponse, status_code=201)
-def create_user(req: CreateUserRequest, request: Request, background_tasks: BackgroundTasks,
-                admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+def create_user(req: CreateUserRequest, request: Request,                admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     if crud.get_user_by_username(db, req.username):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
     try:
@@ -445,7 +470,7 @@ def create_user(req: CreateUserRequest, request: Request, background_tasks: Back
         # Lost a check-then-insert race (or duplicate email) — 409, not a 500.
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username or email already exists")
-    _audit(background_tasks, db, "user_created", request, user=admin,
+    _audit(db, "user_created", request, user=admin,
            resource_type="user", resource_id=str(user.id),
            detail={"username": user.username, "role": user.global_role})
     return CreateUserResponse(user=_user_response(user), api_key=plaintext_key)
@@ -461,7 +486,6 @@ class AdminUpdateUserRequest(BaseModel):
 
 @router.put("/users/{user_id}", response_model=UserResponse)
 def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Request,
-                      background_tasks: BackgroundTasks,
                       admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     if user_id == admin.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admins cannot edit their own account here")
@@ -503,7 +527,7 @@ def admin_update_user(user_id: int, req: AdminUpdateUserRequest, request: Reques
         target.token_version = (target.token_version or 0) + 1
     db.commit()
     db.refresh(target)
-    _audit(background_tasks, db, "user_updated", request, user=admin,
+    _audit(db, "user_updated", request, user=admin,
            resource_type="user", resource_id=str(user_id), detail=changes)
     return _user_response(target)
 
@@ -544,8 +568,7 @@ def get_project(
 
 
 @router.post("/projects", response_model=ProjectResponse, status_code=201)
-def create_project(req: CreateProjectRequest, request: Request, background_tasks: BackgroundTasks,
-                   admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+def create_project(req: CreateProjectRequest, request: Request,                   admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     if crud.get_project_by_name(db, req.name):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
     try:
@@ -553,7 +576,7 @@ def create_project(req: CreateProjectRequest, request: Request, background_tasks
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
-    _audit(background_tasks, db, "project_created", request, user=admin,
+    _audit(db, "project_created", request, user=admin,
            resource_type="project", resource_id=str(project.id),
            detail={"name": project.name})
     return _project_response(project)
@@ -564,7 +587,6 @@ def update_project(
     project_id: int,
     req: UpdateProjectRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -592,7 +614,7 @@ def update_project(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A project with this name already exists")
         action = "project_archived" if changes.get("archived") else (
             "project_unarchived" if changes.get("archived") is False else "project_updated")
-        _audit(background_tasks, db, action, request, user=current_user,
+        _audit(db, action, request, user=current_user,
                resource_type="project", resource_id=str(project_id), detail=changes)
     return _project_response(project)
 
@@ -675,7 +697,6 @@ def add_member(
     project_id: int,
     req: AddMemberRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -696,7 +717,7 @@ def add_member(
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already a member")
-    _audit(background_tasks, db, "project_member_added", request, user=current_user,
+    _audit(db, "project_member_added", request, user=current_user,
            resource_type="project", resource_id=str(project_id),
            detail={"user_id": req.user_id, "role": req.role})
     return _member_response(access, target)
@@ -708,7 +729,6 @@ def update_member_role(
     user_id: int,
     req: UpdateMemberRoleRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -720,7 +740,7 @@ def update_member_role(
     # change has already been committed — looking it up as active-only left the
     # response building against None (500) with the change silently applied.
     target = crud.get_user_by_id_any(db, user_id)
-    _audit(background_tasks, db, "project_member_role_updated", request, user=current_user,
+    _audit(db, "project_member_role_updated", request, user=current_user,
            resource_type="project", resource_id=str(project_id),
            detail={"user_id": user_id, "role": req.role})
     return _member_response(access, target)
@@ -731,14 +751,13 @@ def remove_member(
     project_id: int,
     user_id: int,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     _require_project_admin(db, current_user, project_id)
     if not crud.remove_project_member(db, project_id=project_id, user_id=user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
-    _audit(background_tasks, db, "project_member_removed", request, user=current_user,
+    _audit(db, "project_member_removed", request, user=current_user,
            resource_type="project", resource_id=str(project_id),
            detail={"user_id": user_id})
 
@@ -766,7 +785,6 @@ def create_api_key(
     project_id: int,
     req: CreateAPIKeyRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -778,7 +796,7 @@ def create_api_key(
     key_obj, plaintext_key = crud.create_api_key(
         db, project_id=project_id, name=req.name, allowed_models=req.allowed_models,
     )
-    _audit(background_tasks, db, "api_key_created", request, user=current_user,
+    _audit(db, "api_key_created", request, user=current_user,
            resource_type="api_key", resource_id=str(key_obj.id),
            detail={"name": key_obj.name, "project_id": project_id, "allowed_models": key_obj.allowed_models})
     return CreateAPIKeyResponse(key=_key_response(key_obj), api_key=plaintext_key)
@@ -794,7 +812,6 @@ def update_api_key(
     key_id: int,
     req: UpdateAPIKeyRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -811,7 +828,7 @@ def update_api_key(
     if "allowed_models" in req.model_fields_set and allowed is None:
         allowed = ["all"]
     key = crud.update_api_key(db, key_id, name=req.name, allowed_models=allowed)
-    _audit(background_tasks, db, "api_key_updated", request, user=current_user,
+    _audit(db, "api_key_updated", request, user=current_user,
            resource_type="api_key", resource_id=str(key_id),
            detail={"name": key.name, "allowed_models": key.allowed_models})
     return _key_response(key)
@@ -821,7 +838,6 @@ def update_api_key(
 def reveal_api_key(
     key_id: int,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -844,7 +860,7 @@ def reveal_api_key(
             status_code=status.HTTP_409_CONFLICT,
             detail="Key cannot be decrypted (encryption key has changed). Revoke it and create a new one.",
         )
-    _audit(background_tasks, db, "api_key_revealed", request, severity="warning", user=current_user,
+    _audit(db, "api_key_revealed", request, severity="warning", user=current_user,
            resource_type="api_key", resource_id=str(key_id),
            detail={"name": key.name, "project_id": key.project_id})
     return {"api_key": plaintext}
@@ -854,7 +870,6 @@ def reveal_api_key(
 def revoke_api_key(
     key_id: int,
     request: Request,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -865,7 +880,7 @@ def revoke_api_key(
     if role != "admin" and current_user.global_role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
     crud.revoke_api_key(db, key_id=key_id, project_id=key.project_id)
-    _audit(background_tasks, db, "api_key_revoked", request, user=current_user,
+    _audit(db, "api_key_revoked", request, user=current_user,
            resource_type="api_key", resource_id=str(key_id),
            detail={"name": key.name, "project_id": key.project_id})
 
@@ -883,8 +898,7 @@ def list_ssh_keys(current_user: User = Depends(get_current_user), db: Session = 
 
 
 @router.post("/ssh-keys", response_model=SSHKeyResponse, status_code=201)
-def add_ssh_key(req: AddSSHKeyRequest, request: Request, background_tasks: BackgroundTasks,
-                current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def add_ssh_key(req: AddSSHKeyRequest, request: Request,                current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         key = crud.add_ssh_key(db, user_id=current_user.id, username=current_user.username, key_name=req.key_name, public_key=req.public_key)
     except ValueError as e:
@@ -893,7 +907,7 @@ def add_ssh_key(req: AddSSHKeyRequest, request: Request, background_tasks: Backg
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"Key name '{req.key_name}' is already in use")
-    _audit(background_tasks, db, "ssh_key_added", request, user=current_user,
+    _audit(db, "ssh_key_added", request, user=current_user,
            resource_type="ssh_key", resource_id=str(key.id),
            detail={"key_name": key.key_name})
     return SSHKeyResponse(id=key.id, key_name=key.key_name, public_key=key.public_key,
@@ -938,8 +952,7 @@ class UpdateSSHKeyRequest(BaseModel):
 
 
 @router.put("/ssh-keys/{key_id}", response_model=SSHKeyResponse)
-def update_ssh_key(key_id: int, req: UpdateSSHKeyRequest, request: Request, background_tasks: BackgroundTasks,
-                   current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_ssh_key(key_id: int, req: UpdateSSHKeyRequest, request: Request,                   current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         key = crud.update_ssh_key(db, key_id=key_id, user_id=current_user.id, username=current_user.username,
                                   key_name=req.key_name, public_key=req.public_key)
@@ -951,18 +964,17 @@ def update_ssh_key(key_id: int, req: UpdateSSHKeyRequest, request: Request, back
                             detail=f"Key name '{req.key_name}' is already in use")
     if not key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSH key not found")
-    _audit(background_tasks, db, "ssh_key_updated", request, user=current_user,
+    _audit(db, "ssh_key_updated", request, user=current_user,
            resource_type="ssh_key", resource_id=str(key_id), detail={"key_name": key.key_name})
     return SSHKeyResponse(id=key.id, key_name=key.key_name, public_key=key.public_key,
                           created_at=key.created_at, last_used_at=key.last_used_at)
 
 
 @router.delete("/ssh-keys/{key_id}", status_code=204)
-def delete_ssh_key(key_id: int, request: Request, background_tasks: BackgroundTasks,
-                   current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_ssh_key(key_id: int, request: Request,                   current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not crud.delete_ssh_key(db, key_id=key_id, user_id=current_user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSH key not found")
-    _audit(background_tasks, db, "ssh_key_deleted", request, user=current_user,
+    _audit(db, "ssh_key_deleted", request, user=current_user,
            resource_type="ssh_key", resource_id=str(key_id))
 
 
@@ -991,7 +1003,6 @@ def upsert_pricing(
     model_name: str,
     req: UpsertModelPricingRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -1000,7 +1011,7 @@ def upsert_pricing(
         input_per_1m=req.input_per_1m, output_per_1m=req.output_per_1m,
         currency=req.currency, notes=req.notes,
     )
-    _audit(background_tasks, db, "pricing_updated", request, user=admin,
+    _audit(db, "pricing_updated", request, user=admin,
            resource_type="model_pricing", resource_id=model_name,
            detail={"input_per_1m": req.input_per_1m, "output_per_1m": req.output_per_1m})
     return _pricing_response(pricing)
@@ -1010,13 +1021,12 @@ def upsert_pricing(
 def delete_pricing(
     model_name: str,
     request: Request,
-    background_tasks: BackgroundTasks,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     if not crud.delete_model_pricing(db, model_name):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pricing not found")
-    _audit(background_tasks, db, "pricing_deleted", request, user=admin,
+    _audit(db, "pricing_deleted", request, user=admin,
            resource_type="model_pricing", resource_id=model_name)
 
 

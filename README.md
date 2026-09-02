@@ -21,7 +21,8 @@ Point the OpenAI SDK at UniLLM, and it handles authentication, per-project API k
 **Observability & governance**
 - Per-request logs: tokens, latency, status, cost, model, client IP, key prefix, SSH user, custom labels
 - Cost computed from an admin-managed per-model pricing table
-- Append-only audit trail for every management action (logins, key reveals, role changes, …)
+- Append-only audit trail for every management action (logins, key reveals, role changes, …), including failed and rate-limited login attempts
+- Built-in login brute-force protection: per-IP attempt limits plus per-username failure limits, both configurable
 - Usage dashboard with per-model/per-project stats
 
 ## Architecture
@@ -206,6 +207,9 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 | `UNILLM_MASTER_KEY` / `UNILLM_API_KEYS` | No | Static env-var API keys (fallback when not in DB). |
 | `UNILLM_CORS_ORIGINS` | No | Comma-separated cross-origin allowlist. Default: same-origin only. |
 | `UNILLM_TRUST_PROXY_HEADERS` | No | `true` → trust `X-Forwarded-For` for client IPs (only behind a trusted reverse proxy). |
+| `UNILLM_LOGIN_RATE_LIMIT` | No | Login attempts allowed per client IP, as `<count>/<seconds>`. Default `30/60`. `off` disables. |
+| `UNILLM_LOGIN_FAILURE_LIMIT` | No | Failed logins allowed per username across all IPs. Default `5/900`. Cleared on a successful login; `off` disables. |
+| `UNILLM_DOCS_RATE_LIMIT` | No | Requests per client IP to `/docs`, `/redoc` and `/openapi.json`. Default `30/60`. `off` disables. |
 | `UNILLM_DEV_MODE` | No | `true` → allow unauthenticated requests (disabled whenever a DB is configured). |
 | `UNILLM_SSH_KEYS` | No | Env-var fallback for SSH public keys: `name:pubkey:user,…` (DB is preferred). |
 
@@ -224,7 +228,7 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 | `GET/PUT/DELETE /api/pricing*` | JWT, admin | Per-model pricing |
 | `GET /api/logs/requests`, `/api/logs/stats` | JWT (scoped to your projects) | Request logs & usage stats |
 | `GET /api/logs/audit` | JWT, admin | Audit trail |
-| `GET /docs`, `/redoc` | — | Interactive API docs |
+| `GET /docs`, `/redoc`, `/openapi.json` | none (rate limited) | Interactive API docs |
 
 ## Production checklist
 
@@ -232,7 +236,7 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 - Decide on key recoverability: keep the default (encrypted, admin-revealable, audited) or set `UNILLM_RECOVERABLE_KEYS=false` so keys are shown once and never stored in recoverable form.
 - Use PostgreSQL (`DATABASE_URL`) — the SQLite default is for single-user/dev use.
 - Terminate TLS at a reverse proxy; set `UNILLM_TRUST_PROXY_HEADERS=true` there and bind UniLLM to localhost (default bind is `0.0.0.0`).
-- Add rate limiting / brute-force protection at the proxy layer (none is built in yet).
+- Review the built-in rate limits (`UNILLM_LOGIN_RATE_LIMIT`, `UNILLM_LOGIN_FAILURE_LIMIT`, `UNILLM_DOCS_RATE_LIMIT`). They are per-process, so with several replicas each enforces its own share — add a shared limiter at the reverse proxy if you run more than one.
 - Set model pricing in the console so request costs are recorded.
 - Back up the database — it holds users, hashed keys, and the audit trail.
 

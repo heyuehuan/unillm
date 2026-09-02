@@ -30,6 +30,7 @@ from unillm.proxy.auth import (
     _check_model_access,
 )
 from unillm.proxy.api_routes import router as api_router, _client_ip
+from unillm.proxy import ratelimit
 from unillm.types import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -203,6 +204,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Throttle the public docs endpoints. They are intentionally unauthenticated —
+# an OpenAPI schema is not a secret and self-hosted users expect /docs to work —
+# but "public" should not mean "free to scrape at any rate".
+_THROTTLED_PUBLIC_PATHS = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+
+
+@app.middleware("http")
+async def _throttle_public_docs(request: Request, call_next):
+    if request.url.path in _THROTTLED_PUBLIC_PATHS:
+        retry_after = ratelimit.docs_limiter.hit(_client_ip(request))
+        if retry_after is not None:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Too many requests"},
+                headers={"Retry-After": str(retry_after)},
+            )
+    return await call_next(request)
+
 
 # Management API routes
 app.include_router(api_router)

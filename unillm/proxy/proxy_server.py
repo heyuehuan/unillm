@@ -31,6 +31,7 @@ from unillm.proxy.auth import (
 )
 from unillm.proxy.api_routes import router as api_router, _client_ip
 from unillm.proxy import ratelimit
+from unillm.proxy.security_headers import apply_security_headers, DOCS_PATHS
 from unillm.types import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -207,8 +208,9 @@ app.add_middleware(
 
 # Throttle the public docs endpoints. They are intentionally unauthenticated —
 # an OpenAPI schema is not a secret and self-hosted users expect /docs to work —
-# but "public" should not mean "free to scrape at any rate".
-_THROTTLED_PUBLIC_PATHS = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+# but "public" should not mean "free to scrape at any rate". Registered before the
+# header middleware so the 429 it returns still gets the security headers.
+_THROTTLED_PUBLIC_PATHS = DOCS_PATHS | {"/openapi.json"}
 
 
 @app.middleware("http")
@@ -223,6 +225,12 @@ async def _throttle_public_docs(request: Request, call_next):
                 headers={"Retry-After": str(retry_after)},
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Outermost middleware, so every response — including errors — carries the headers."""
+    return apply_security_headers(request, await call_next(request))
 
 
 # Management API routes

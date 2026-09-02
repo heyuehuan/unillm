@@ -23,6 +23,7 @@ Point the OpenAI SDK at UniLLM, and it handles authentication, per-project API k
 - Cost computed from an admin-managed per-model pricing table
 - Append-only audit trail for every management action (logins, key reveals, role changes, …), including failed and rate-limited login attempts
 - Built-in login brute-force protection: per-IP attempt limits plus per-username failure limits, both configurable
+- Security response headers on every response: a strict CSP (`script-src 'self'`), plus frame, sniffing, referrer and permissions policies, and HSTS over HTTPS
 - Usage dashboard with per-model/per-project stats
 
 ## Architecture
@@ -210,6 +211,9 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 | `UNILLM_LOGIN_RATE_LIMIT` | No | Login attempts allowed per client IP, as `<count>/<seconds>`. Default `30/60`. `off` disables. |
 | `UNILLM_LOGIN_FAILURE_LIMIT` | No | Failed logins allowed per username across all IPs. Default `5/900`. Cleared on a successful login; `off` disables. |
 | `UNILLM_DOCS_RATE_LIMIT` | No | Requests per client IP to `/docs`, `/redoc` and `/openapi.json`. Default `30/60`. `off` disables. |
+| `UNILLM_SECURITY_HEADERS` | No | Default `true`: send CSP, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` and HSTS. `false` sends none of them. |
+| `UNILLM_CSP` | No | Replace the app Content-Security-Policy outright. `off` sends no policy but keeps the other headers. The `/docs` and `/redoc` policy is separate and unaffected. |
+| `UNILLM_HSTS_MAX_AGE` | No | HSTS max-age in seconds, default `31536000`. `0` disables. Only sent over HTTPS. |
 | `UNILLM_DEV_MODE` | No | `true` → allow unauthenticated requests (disabled whenever a DB is configured). |
 | `UNILLM_SSH_KEYS` | No | Env-var fallback for SSH public keys: `name:pubkey:user,…` (DB is preferred). |
 
@@ -236,6 +240,7 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 - Decide on key recoverability: keep the default (encrypted, admin-revealable, audited) or set `UNILLM_RECOVERABLE_KEYS=false` so keys are shown once and never stored in recoverable form.
 - Use PostgreSQL (`DATABASE_URL`) — the SQLite default is for single-user/dev use.
 - Terminate TLS at a reverse proxy; set `UNILLM_TRUST_PROXY_HEADERS=true` there and bind UniLLM to localhost (default bind is `0.0.0.0`).
+- Security headers are on by default. If your reverse proxy also sets them, drop one of the two — UniLLM only fills in headers that are not already present, but a proxy that appends rather than replaces will produce duplicates.
 - Review the built-in rate limits (`UNILLM_LOGIN_RATE_LIMIT`, `UNILLM_LOGIN_FAILURE_LIMIT`, `UNILLM_DOCS_RATE_LIMIT`). They are per-process, so with several replicas each enforces its own share — add a shared limiter at the reverse proxy if you run more than one.
 - Set model pricing in the console so request costs are recorded.
 - Back up the database — it holds users, hashed keys, and the audit trail.

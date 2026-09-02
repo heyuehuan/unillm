@@ -393,7 +393,7 @@ function RoleSelect({ value, onChange, style }) {
   )
 }
 
-function MembersTab({ project, members, canManage, onReload }) {
+function MembersTab({ project, members, canManage, currentUserId, onReload }) {
   const confirm = useConfirm()
   // A personal project is standalone — it belongs to one account and the server
   // rejects every membership call on it. Hide the controls rather than offering
@@ -541,10 +541,17 @@ function MembersTab({ project, members, canManage, onReload }) {
                   {canEditMembers && (
                     <td>
                       <div style={{ display: 'flex', gap: 4 }}>
-                        <button className="iconbtn" title="Edit role" aria-label="Edit role" onClick={() => { setEditingId(m.user_id); setEditRole(m.role) }}>
+                        {/* Your own row is read-only: demoting or removing yourself
+                            takes away the right you just used, and the server
+                            refuses it anyway. */}
+                        <button className="iconbtn" disabled={m.user_id === currentUserId}
+                          title={m.user_id === currentUserId ? 'Another admin has to change your role' : 'Edit role'}
+                          aria-label="Edit role" onClick={() => { setEditingId(m.user_id); setEditRole(m.role) }}>
                           <IcEdit size={13} />
                         </button>
-                        <button className="iconbtn" title="Remove" aria-label="Remove member" style={{ color: 'var(--red)' }} onClick={() => remove(m)}>
+                        <button className="iconbtn" disabled={m.user_id === currentUserId}
+                          title={m.user_id === currentUserId ? 'Another admin has to remove you' : 'Remove'}
+                          aria-label="Remove member" style={{ color: 'var(--red)' }} onClick={() => remove(m)}>
                           <IcTrash size={13} />
                         </button>
                       </div>
@@ -713,6 +720,7 @@ function ProjectDetail({ projectId, user, tab }) {
           project={project}
           members={members}
           canManage={canManage}
+          currentUserId={user?.id}
           onReload={loadData}
         />
       )}

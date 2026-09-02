@@ -785,6 +785,21 @@ def _require_project_admin(db, current_user, project_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
 
 
+def _reject_self_membership_change(current_user, user_id, action):
+    """
+    An admin may not change or remove their own membership row.
+
+    Demoting or removing yourself takes away the very right you used to do it,
+    and on a project with a single admin that leaves nobody who can manage
+    members. It has to come from another admin.
+    """
+    if current_user.id == user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"You cannot {action} your own membership — ask another project admin",
+        )
+
+
 def _reject_personal_project(db, project_id):
     """
     Membership does not apply to a personal project.
@@ -883,6 +898,7 @@ def update_member_role(
 ):
     _require_project_admin(db, current_user, project_id)
     _reject_personal_project(db, project_id)
+    _reject_self_membership_change(current_user, user_id, "change the role of")
     access = crud.update_member_role(db, project_id=project_id, user_id=user_id, role=req.role)
     if not access:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
@@ -906,6 +922,7 @@ def remove_member(
 ):
     _require_project_admin(db, current_user, project_id)
     _reject_personal_project(db, project_id)
+    _reject_self_membership_change(current_user, user_id, "remove")
     if not crud.remove_project_member(db, project_id=project_id, user_id=user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
     _audit(db, "project_member_removed", request, user=current_user,

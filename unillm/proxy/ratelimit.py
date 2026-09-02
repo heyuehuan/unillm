@@ -38,10 +38,18 @@ from collections import OrderedDict, deque
 from typing import Deque, Optional, Tuple
 
 # Cap on tracked keys, so a flood from many source IPs cannot grow the table
-# without bound. Least-recently-touched keys are evicted first; evicting a key
-# only forgets its history, it never grants access it would otherwise be denied
-# for longer than the window.
+# without bound. Least-recently-touched keys are evicted first.
+#
+# Evicting a key forgets its history, which for a key that is *currently blocked*
+# means handing back a budget it had already spent. So eviction skips blocked keys
+# while any unblocked key remains: the table stays bounded, but a flood of new keys
+# can no longer be used to wipe somebody's lockout. Only when every candidate is
+# blocked does it fall back to plain least-recently-used.
 _MAX_TRACKED_KEYS = 10_000
+
+# How far to look for an unblocked key before giving up and evicting the oldest.
+# Bounded so a table of blocked keys cannot make each insert a full scan.
+_EVICTION_SCAN_LIMIT = 64
 
 
 class SlidingWindowLimiter:
@@ -76,6 +84,11 @@ class SlidingWindowLimiter:
             times = self._hits.get(key)
             if not times:
                 return None
+            # Consulting a key counts as touching it. Without this a blocked key
+            # never moves — rejected attempts are deliberately not recorded — so it
+            # would drift to the front of the eviction order and an attacker could
+            # flush their own lockout by filling the table with fresh keys.
+            self._hits.move_to_end(key)
             self._prune(times, now)
             if len(times) < self.limit:
                 return None
@@ -94,8 +107,23 @@ class SlidingWindowLimiter:
             self._hits.move_to_end(key)
             self._prune(times, now)
             times.append(now)
-            while len(self._hits) > _MAX_TRACKED_KEYS:
-                self._hits.popitem(last=False)
+            self._evict_over_cap(now)
+
+    def _evict_over_cap(self, now: float) -> None:
+        """Trim the table back to the cap, sparing blocked keys. Caller holds the lock."""
+        while len(self._hits) > _MAX_TRACKED_KEYS:
+            evict = None
+            for scanned, (key, times) in enumerate(self._hits.items()):
+                if scanned >= _EVICTION_SCAN_LIMIT:
+                    break
+                self._prune(times, now)
+                if len(times) < self.limit:
+                    evict = key
+                    break
+            if evict is None:
+                # Everything in range is still blocked; the cap wins over the block.
+                evict = next(iter(self._hits))
+            del self._hits[evict]
 
     def hit(self, key: Optional[str]) -> Optional[int]:
         """

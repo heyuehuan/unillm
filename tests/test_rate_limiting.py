@@ -141,6 +141,53 @@ def test_parse_limit(spec, expected):
     assert parse_limit(spec, (30, 60.0)) == expected
 
 
+def test_a_flood_of_new_keys_cannot_wipe_an_active_block(monkeypatch):
+    """
+    The eviction table is bounded, and a blocked key used to be the *first* thing
+    thrown out of it: rejected attempts are not recorded, so a blocked key stopped
+    moving in the least-recently-used order while every new key jumped ahead of it.
+
+    An attacker could exploit that directly — lock an account, then fail logins for
+    enough throwaway usernames to push the victim's entry out of the table, and the
+    lockout was gone. Blocking has to survive the flood.
+    """
+    monkeypatch.setattr(ratelimit, "_MAX_TRACKED_KEYS", 50)
+    limiter = SlidingWindowLimiter(limit=2, window=900.0)
+
+    limiter.hit("victim")
+    limiter.hit("victim")
+    assert limiter.check("victim") is not None, "victim starts out blocked"
+
+    for i in range(500):
+        limiter.hit(f"throwaway-{i}")
+        # The attacker keeps probing the blocked account, as they would when trying
+        # to find out whether the lockout has lifted.
+        assert limiter.check("victim") is not None, f"block was lost after {i} new keys"
+
+
+def test_the_key_table_stays_bounded(monkeypatch):
+    monkeypatch.setattr(ratelimit, "_MAX_TRACKED_KEYS", 50)
+    limiter = SlidingWindowLimiter(limit=2, window=900.0)
+    for i in range(500):
+        limiter.hit(f"key-{i}")
+    assert len(limiter._hits) <= 50
+
+
+def test_eviction_prefers_unblocked_keys(monkeypatch):
+    """A blocked key is only evicted when nothing unblocked is available."""
+    monkeypatch.setattr(ratelimit, "_MAX_TRACKED_KEYS", 3)
+    limiter = SlidingWindowLimiter(limit=2, window=900.0)
+
+    limiter.hit("blocked")
+    limiter.hit("blocked")          # now at its limit
+    limiter.hit("idle-a")           # one hit each: not blocked
+    limiter.hit("idle-b")
+    limiter.hit("newcomer")         # pushes the table over the cap
+
+    assert "blocked" in limiter._hits
+    assert limiter.check("blocked") is not None
+
+
 # --- login endpoint ------------------------------------------------------------------
 
 def test_login_is_rate_limited_per_ip_and_username(client, monkeypatch):

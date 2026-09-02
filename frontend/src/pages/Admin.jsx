@@ -389,10 +389,33 @@ function PricingTab() {
 
 // ── Settings tab ───────────────────────────────────────────
 
-// The API returns bytes. Operators think in MB, so the field takes MB and this
-// converts, rather than asking anyone to type 1048576.
-function bytesToMb(bytes) {
-  return (bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 2)
+// Each setting carries its own unit. A byte size is edited in MB, because nobody
+// wants to type 1048576; everything else is edited as the number the server
+// stores. The earlier version divided every setting by one megabyte, which was
+// right only for as long as the byte-valued one was the only setting there was.
+const BYTES_PER_MB = 1024 * 1024
+
+const isBytes = (setting) => setting.unit === 'bytes'
+
+const unitLabel = (setting) => (isBytes(setting) ? 'MB' : setting.unit || '')
+
+function toDisplay(setting, value) {
+  if (value == null) return ''
+  if (!isBytes(setting)) return String(value)
+  return (value / BYTES_PER_MB).toFixed(value % BYTES_PER_MB === 0 ? 0 : 2)
+}
+
+// Returns null when the field does not hold a number, so the caller can say so
+// instead of sending NaN to the server.
+function toStored(setting, text) {
+  const typed = parseFloat(text)
+  if (!Number.isFinite(typed)) return null
+  return isBytes(setting) ? Math.round(typed * BYTES_PER_MB) : typed
+}
+
+function withUnit(setting, value) {
+  const unit = unitLabel(setting)
+  return unit ? `${toDisplay(setting, value)} ${unit}` : toDisplay(setting, value)
 }
 
 const SOURCE_LABEL = {
@@ -415,18 +438,32 @@ function SettingsTab() {
     try {
       const rows = await api.getSettings()
       setSettings(rows)
-      setDrafts(Object.fromEntries(rows.map(r => [r.key, String(bytesToMb(r.value))])))
+      setDrafts(Object.fromEntries(rows.map(r => [r.key, toDisplay(r, r.value)])))
     } catch (e) { setError(e.message) } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [])
 
   async function save(setting) {
-    const mb = parseFloat(drafts[setting.key])
-    if (!Number.isFinite(mb) || mb <= 0) { setError('Enter a size in MB greater than zero.'); return }
+    const value = toStored(setting, drafts[setting.key])
+    const unit = unitLabel(setting)
+    if (value == null) {
+      setError(`Enter a number${unit ? ` in ${unit}` : ''} for ${setting.key}.`)
+      return
+    }
+    // The server validates too; checking here turns a 400 into a message that
+    // names the limit in the same unit the field is using.
+    if (setting.minimum != null && value < setting.minimum) {
+      setError(`${setting.key} must be at least ${withUnit(setting, setting.minimum)}.`)
+      return
+    }
+    if (setting.maximum != null && value > setting.maximum) {
+      setError(`${setting.key} must be at most ${withUnit(setting, setting.maximum)}.`)
+      return
+    }
     setSavingKey(setting.key)
     setError('')
     try {
-      await api.updateSetting(setting.key, Math.round(mb * 1024 * 1024))
+      await api.updateSetting(setting.key, value)
       await load()
     } catch (e) { setError(e.message) } finally { setSavingKey(null) }
   }
@@ -458,7 +495,7 @@ function SettingsTab() {
         <div className="card">
           <table className="table">
             <thead>
-              <tr><th>Setting</th><th>Value (MB)</th><th>Source</th><th></th></tr>
+              <tr><th>Setting</th><th>Value</th><th>Source</th><th></th></tr>
             </thead>
             <tbody>
               {settings.map(s => (
@@ -467,17 +504,21 @@ function SettingsTab() {
                     <div className="mono" style={{ fontSize: 12 }}>{s.key}</div>
                     <div style={{ color: 'var(--text-3)', fontSize: 12, marginTop: 4 }}>{s.description}</div>
                   </td>
-                  <td style={{ width: 140 }}>
-                    <input
-                      className="input"
-                      type="number"
-                      step="0.5"
-                      min="0.01"
-                      aria-label={`${s.key} in MB`}
-                      value={drafts[s.key] ?? ''}
-                      onChange={e => setDrafts(d => ({ ...d, [s.key]: e.target.value }))}
-                    />
-                    <div className="hint">Default {bytesToMb(s.default)} MB</div>
+                  <td style={{ width: 170 }}>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input
+                        className="input"
+                        type="number"
+                        step={isBytes(s) ? '0.5' : 'any'}
+                        min={s.minimum != null ? toDisplay(s, s.minimum) : undefined}
+                        max={s.maximum != null ? toDisplay(s, s.maximum) : undefined}
+                        aria-label={unitLabel(s) ? `${s.key} in ${unitLabel(s)}` : s.key}
+                        value={drafts[s.key] ?? ''}
+                        onChange={e => setDrafts(d => ({ ...d, [s.key]: e.target.value }))}
+                      />
+                      {unitLabel(s) && <span style={{ color: 'var(--text-3)', fontSize: 12 }}>{unitLabel(s)}</span>}
+                    </div>
+                    <div className="hint">Default {withUnit(s, s.default)}</div>
                   </td>
                   <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{SOURCE_LABEL[s.source] || s.source}</td>
                   <td style={{ whiteSpace: 'nowrap' }}>

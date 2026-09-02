@@ -21,6 +21,7 @@ from unillm.db import get_db
 from unillm.db import crud
 from unillm.db.models import APIKey, Project, User
 from unillm.proxy import ratelimit
+from unillm.proxy import server_settings
 
 router = APIRouter(prefix="/api", tags=["management"])
 
@@ -198,6 +199,23 @@ class ModelPricingResponse(BaseModel):
     currency: str
     notes: Optional[str]
     updated_at: datetime
+
+
+class ServerSettingResponse(BaseModel):
+    """A setting's effective value plus enough context to explain where it came from."""
+    key: str
+    value: Any
+    source: Literal["database", "config", "default"]
+    default: Any
+    config_value: Optional[Any] = None
+    description: str
+    unit: Optional[str] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+
+
+class UpdateServerSettingRequest(BaseModel):
+    value: Any
 
 
 class UpsertModelPricingRequest(BaseModel):
@@ -399,16 +417,24 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
 class ServerConfigResponse(BaseModel):
     """Deployment switches the console needs in order to render honestly."""
     recoverable_keys_allowed: bool
+    logprobs_max_bytes: int
 
 
 @router.get("/config", response_model=ServerConfigResponse)
-def get_server_config(_: User = Depends(get_current_user)):
+def get_server_config(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Report deployment-wide toggles. Without this the console would offer a
     "let me reveal this later" checkbox on a deployment that forbids it, and the
     create call would fail after the user had filled the form in.
+
+    The logprobs cap is here rather than admin-only because every caller needs it:
+    it decides how many tokens of logprobs a request can ask for before being
+    rejected, so a non-admin sizing a batch job has to be able to read it.
     """
-    return ServerConfigResponse(recoverable_keys_allowed=recoverable_keys_allowed())
+    return ServerConfigResponse(
+        recoverable_keys_allowed=recoverable_keys_allowed(),
+        logprobs_max_bytes=server_settings.get_setting(db, server_settings.LOGPROBS_MAX_BYTES),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1050,61 @@ def delete_ssh_key(key_id: int, request: Request,                   current_user
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSH key not found")
     _audit(db, "ssh_key_deleted", request, user=current_user,
            resource_type="ssh_key", resource_id=str(key_id))
+
+
+# ---------------------------------------------------------------------------
+# Server Settings
+# ---------------------------------------------------------------------------
+
+@router.get("/settings", response_model=List[ServerSettingResponse])
+def list_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return [ServerSettingResponse(**row) for row in server_settings.describe(db)]
+
+
+@router.put("/settings/{key}", response_model=ServerSettingResponse)
+def update_setting(
+    key: str,
+    req: UpdateServerSettingRequest,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    definition = server_settings.SETTINGS.get(key)
+    if definition is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown setting '{key}'")
+    try:
+        value = definition.validate(req.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    crud.set_server_setting(db, key=key, value=value, updated_by=admin.username)
+    server_settings.invalidate_cache()
+    _audit(db, "setting_updated", request, user=admin,
+           resource_type="server_setting", resource_id=key, detail={"value": value})
+    return _setting_response(db, key)
+
+
+@router.delete("/settings/{key}", response_model=ServerSettingResponse)
+def reset_setting(
+    key: str,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Drop the override so the setting falls back to the config file or the default."""
+    if key not in server_settings.SETTINGS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown setting '{key}'")
+    crud.delete_server_setting(db, key)
+    server_settings.invalidate_cache()
+    _audit(db, "setting_reset", request, user=admin,
+           resource_type="server_setting", resource_id=key)
+    return _setting_response(db, key)
+
+
+def _setting_response(db: Session, key: str) -> ServerSettingResponse:
+    for row in server_settings.describe(db):
+        if row["key"] == key:
+            return ServerSettingResponse(**row)
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown setting '{key}'")
 
 
 # ---------------------------------------------------------------------------

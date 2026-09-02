@@ -101,6 +101,11 @@ export const api = {
   getRequests: (params) => req('GET', `/api/logs/requests${qs(params)}`),
   getAudit: (params) => req('GET', `/api/logs/audit${qs(params)}`),
 
+  getSettings: () => req('GET', '/api/settings'),
+  updateSetting: (key, value) => req('PUT', `/api/settings/${encodeURIComponent(key)}`, { value }),
+  // Deleting the override is how a setting goes back to the config file / default.
+  resetSetting: (key) => req('DELETE', `/api/settings/${encodeURIComponent(key)}`),
+
   getPricing: () => req('GET', '/api/pricing'),
   upsertPricing: (model, data) => req('PUT', `/api/pricing/${encodeURIComponent(model)}`, data),
   deletePricing: (model) => req('DELETE', `/api/pricing/${encodeURIComponent(model)}`),

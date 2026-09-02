@@ -1,4 +1,5 @@
 import hashlib
+import json
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -8,7 +9,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from unillm.config import get_fernet_key, recoverable_keys_allowed
-from unillm.db.models import APIKey, AuditLog, ModelPricing, Project, RequestLog, SSHKey, User, UserProjectAccess
+from unillm.db.models import (
+    APIKey, AuditLog, ModelPricing, Project, RequestLog, ServerSetting, SSHKey, User, UserProjectAccess,
+)
 from unillm.types import SSHKeyInfo
 
 
@@ -713,6 +716,61 @@ def get_request_stats(
         ],
         "by_status": {str(r[0]): r[1] for r in by_status},
     }
+
+
+# ---------------------------------------------------------------------------
+# Server Settings
+# ---------------------------------------------------------------------------
+
+def get_server_setting(db: Session, key: str) -> Optional[ServerSetting]:
+    return db.query(ServerSetting).filter(ServerSetting.key == key).first()
+
+
+def list_server_settings(db: Session) -> List[ServerSetting]:
+    return db.query(ServerSetting).order_by(ServerSetting.key).all()
+
+
+def get_server_setting_values(db: Session) -> Dict[str, Any]:
+    """
+    Every overridden setting as a {key: decoded value} map.
+
+    A row whose JSON fails to decode is skipped rather than raised on: a single
+    corrupt row should cost that one setting its override, not break every request
+    that needs to read any setting.
+    """
+    values: Dict[str, Any] = {}
+    for row in db.query(ServerSetting).all():
+        try:
+            values[row.key] = json.loads(row.value)
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def set_server_setting(db: Session, key: str, value: Any, updated_by: Optional[str] = None) -> ServerSetting:
+    """Store an admin override. The value is JSON-encoded so type survives the round trip."""
+    encoded = json.dumps(value)
+    row = get_server_setting(db, key)
+    if row:
+        row.value = encoded
+        row.updated_by = updated_by
+        row.updated_at = _utcnow()
+    else:
+        row = ServerSetting(key=key, value=encoded, updated_by=updated_by)
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_server_setting(db: Session, key: str) -> bool:
+    """Drop an override so the setting falls back to the config file or built-in default."""
+    row = get_server_setting(db, key)
+    if not row:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
 
 
 # ---------------------------------------------------------------------------

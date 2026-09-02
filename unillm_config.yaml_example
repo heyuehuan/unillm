@@ -16,3 +16,8 @@ general_settings:
   # Strip params the model doesn't support instead of returning 400.
   # Same semantics as litellm's `litellm_settings: drop_params`.
   # drop_params: false
+  # Cap on the logprobs a single request may return. Defaults to 1 MB, which is
+  # about 540 generated tokens at top_logprobs: 20 in the OpenAI shape. Admins can
+  # override this at runtime under Admin -> Server Settings; clearing that override
+  # falls back to whatever is set here.
+  # logprobs_max_bytes: 1048576

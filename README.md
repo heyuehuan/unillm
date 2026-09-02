@@ -159,6 +159,77 @@ count, and a bare threshold is unbounded anyway — probabilities sum to 1, so a
 `0.0001` permits up to 10,000 alternatives at a single position where `top_logprobs` caps
 at 20.
 
+#### Shrinking the payload with `logprobs_format: "compact"`
+
+The OpenAI shape spends four JSON keys and a nested object on every single alternative.
+`logprobs_format: "compact"` collapses each position to a plain `{token: logprob}` map with
+the token already decoded, which is roughly a third of the bytes:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-..." \
+  -d '{"model": "gemini-2.5-flash-lite", "messages": [{"role":"user","content":"Yes or no?"}],
+       "logprobs": true, "top_logprobs": 20, "logprobs_format": "compact"}'
+```
+
+```jsonc
+"logprobs": {
+  "format": "compact",
+  "tokens": ["Yes"],
+  "token_logprobs": [-0.05],
+  "top_logprobs": [{"Yes": -0.05, "No": -3.2}]   // decoded tokens, straight to logprobs
+}
+```
+
+Measured against the standard shape, that is 61% smaller at `top_logprobs: 5` and 65% smaller
+at `top_logprobs: 20` — a bigger saving than any `logprobs_min_p` floor can produce, because
+it removes per-entry structure rather than entries.
+
+Three things to know before switching:
+
+- **It is not OpenAI-compatible.** An OpenAI SDK will not parse it. Use it when you read the
+  response yourself, which is the normal case for classification and scoring.
+- **The `bytes` field is gone.** If you need the raw UTF-8 of a token — for tokens that are
+  partial multi-byte sequences — stay on the default format.
+- **Duplicate decoded tokens collapse.** Two token ids can decode to the same string; the map
+  has room for one, and keeps the higher logprob.
+
+It is opt-in and defaults to `"openai"`, so existing clients see byte-identical responses. It
+works streamed and not, and combines with `logprobs_min_p`. On `/v1/completions` it is accepted
+but has no effect: that endpoint already returns the flat shape.
+
+#### Capping the total size with `logprobs_max_bytes`
+
+Logprobs are the one part of a response whose size the caller controls and the model does not.
+`logprobs_max_bytes` caps how many bytes of them a single request may return. It defaults to
+**1 MB**, which is about 540 generated tokens at `top_logprobs: 20` in the OpenAI shape, or
+about 1,500 in the compact one.
+
+Set it in the config file:
+
+```yaml
+general_settings:
+  logprobs_max_bytes: 2097152   # 2 MB
+```
+
+...or change it at runtime under **Admin → Server Settings**, which needs a global admin and is
+written to the audit log. Resolution runs database → config file → built-in default, so clearing
+the value in the console falls back to whatever the file says. Every authenticated user can read
+the effective value from `GET /api/config`.
+
+The cap is enforced twice:
+
+- **Before inference**, when the request is provably too big. A request with `max_tokens` set
+  whose *smallest possible* logprobs payload already exceeds the cap is rejected with **413**
+  and a message naming the limit. The check uses a lower bound, not an average, so it never
+  refuses a request that would have fit.
+- **After generation**, exactly. Anything still over budget is truncated to a prefix and marked
+  with `"truncated": true` and `"truncated_at": <positions returned>`. Truncation is never
+  silent — without the marker a caller could not tell a withheld tail from a short answer.
+
+The budget covers the whole request, so `n: 4` shares one allowance across the four choices, and
+a streamed response spends it across chunks rather than per chunk.
+
 ### 3. Set required secrets and bootstrap the first admin
 
 ```bash

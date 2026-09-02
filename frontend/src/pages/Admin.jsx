@@ -375,6 +375,117 @@ function PricingTab() {
   )
 }
 
+// ── Settings tab ───────────────────────────────────────────
+
+// The API returns bytes. Operators think in MB, so the field takes MB and this
+// converts, rather than asking anyone to type 1048576.
+function bytesToMb(bytes) {
+  return (bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 2)
+}
+
+const SOURCE_LABEL = {
+  database: 'Set here',
+  config: 'From config file',
+  default: 'Built-in default',
+}
+
+function SettingsTab() {
+  const confirm = useConfirm()
+  const [settings, setSettings] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [drafts, setDrafts] = useState({})
+  const [savingKey, setSavingKey] = useState(null)
+  const [error, setError] = useState('')
+
+  async function load() {
+    setLoading(true)
+    try {
+      const rows = await api.getSettings()
+      setSettings(rows)
+      setDrafts(Object.fromEntries(rows.map(r => [r.key, String(bytesToMb(r.value))])))
+    } catch (e) { setError(e.message) } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+
+  async function save(setting) {
+    const mb = parseFloat(drafts[setting.key])
+    if (!Number.isFinite(mb) || mb <= 0) { setError('Enter a size in MB greater than zero.'); return }
+    setSavingKey(setting.key)
+    setError('')
+    try {
+      await api.updateSetting(setting.key, Math.round(mb * 1024 * 1024))
+      await load()
+    } catch (e) { setError(e.message) } finally { setSavingKey(null) }
+  }
+
+  async function reset(setting) {
+    const fallback = setting.config_value != null ? 'the value in the config file' : 'the built-in default'
+    const ok = await confirm(
+      `Reset ${setting.key} to ${fallback}?`,
+      { title: 'Reset setting', confirmLabel: 'Reset' },
+    )
+    if (!ok) return
+    setSavingKey(setting.key)
+    try { await api.resetSetting(setting.key); await load() } catch (e) { setError(e.message) } finally { setSavingKey(null) }
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 16 }}>
+        Changes take effect within a few seconds, without a restart. Resetting a setting
+        falls back to the config file, or to the built-in default if the file is silent.
+      </div>
+
+      {error && <div className="alert error">{error}</div>}
+
+      {loading ? (
+        <div style={{ color: 'var(--text-3)' }}>Loading…</div>
+      ) : (
+        <div className="card">
+          <table className="table">
+            <thead>
+              <tr><th>Setting</th><th>Value (MB)</th><th>Source</th><th></th></tr>
+            </thead>
+            <tbody>
+              {settings.map(s => (
+                <tr key={s.key}>
+                  <td style={{ maxWidth: 420 }}>
+                    <div className="mono" style={{ fontSize: 12 }}>{s.key}</div>
+                    <div style={{ color: 'var(--text-3)', fontSize: 12, marginTop: 4 }}>{s.description}</div>
+                  </td>
+                  <td style={{ width: 140 }}>
+                    <input
+                      className="input"
+                      type="number"
+                      step="0.5"
+                      min="0.01"
+                      aria-label={`${s.key} in MB`}
+                      value={drafts[s.key] ?? ''}
+                      onChange={e => setDrafts(d => ({ ...d, [s.key]: e.target.value }))}
+                    />
+                    <div className="hint">Default {bytesToMb(s.default)} MB</div>
+                  </td>
+                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{SOURCE_LABEL[s.source] || s.source}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <button className="btn primary sm" disabled={savingKey === s.key} onClick={() => save(s)}>
+                      {savingKey === s.key ? 'Saving…' : 'Save'}
+                    </button>
+                    {s.source === 'database' && (
+                      <button className="btn sm" style={{ marginLeft: 8 }} disabled={savingKey === s.key} onClick={() => reset(s)}>
+                        <IcRefresh size={12} /> Reset
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Audit tab ──────────────────────────────────────────────
 const SEVERITIES = ['info', 'warning', 'error', 'critical']
 
@@ -509,18 +620,18 @@ function AuditTab() {
 
 // ── Main Admin page ────────────────────────────────────────
 export default function Admin({ currentUser, tab = 'users' }) {
-  const activeTab = ['users', 'pricing', 'audit'].includes(tab) ? tab : 'users'
+  const activeTab = ['users', 'pricing', 'settings', 'audit'].includes(tab) ? tab : 'users'
   return (
     <div className="content">
       <div className="page-h">
         <div>
           <h1 className="page-title">Admin</h1>
-          <div className="page-sub">User management, model pricing, and audit trail</div>
+          <div className="page-sub">User management, model pricing, server settings, and audit trail</div>
         </div>
       </div>
 
       <div className="tabs">
-        {[['users', 'Users'], ['pricing', 'Model Pricing'], ['audit', 'Audit Log']].map(([id, label]) => (
+        {[['users', 'Users'], ['pricing', 'Model Pricing'], ['settings', 'Server Settings'], ['audit', 'Audit Log']].map(([id, label]) => (
           <button key={id} className={`tab${activeTab === id ? ' active' : ''}`} onClick={() => navigate(`admin/${id}`)}>
             {label}
           </button>
@@ -529,6 +640,7 @@ export default function Admin({ currentUser, tab = 'users' }) {
 
       {activeTab === 'users' && <UsersTab currentUser={currentUser} />}
       {activeTab === 'pricing' && <PricingTab />}
+      {activeTab === 'settings' && <SettingsTab />}
       {activeTab === 'audit' && <AuditTab />}
     </div>
   )

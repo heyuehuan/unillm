@@ -3,7 +3,7 @@ Type definitions for UniLLM
 """
 
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
 from datetime import datetime
 import time
 
@@ -43,6 +43,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs: Optional[bool] = Field(None, description="Return log probabilities of the output tokens. Only served by models configured with supports_logprobs")
     top_logprobs: Optional[int] = Field(None, description="Number of most likely tokens to return at each position, each with a log probability. Requires logprobs=true", ge=0, le=20)
     logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Thins top_logprobs at confident positions; the chosen token's own logprob is always kept. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
+    logprobs_format: Optional[Literal["openai", "compact"]] = Field(None, description="Wire format for returned logprobs. 'openai' (default) is the standard array-of-objects shape; 'compact' returns parallel arrays with alternatives as a {token: logprob} map, about a third of the bytes, at the cost of the per-token 'bytes' field. UniLLM-only")
     user: Optional[str] = Field(None, description="Unique user identifier")
     labels: Optional[Dict[str, str]] = Field(None, description="Optional labels for request logging (UniLLM-only, not forwarded to backends)")
 
@@ -66,6 +67,13 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError(
                 "'logprobs_min_p' filters the alternatives returned by 'top_logprobs', "
                 "so it requires a non-zero 'top_logprobs'"
+            )
+        # Same reasoning: a format for logprobs that were never requested is a
+        # parameter the response cannot honor.
+        if self.logprobs_format is not None and not self.logprobs:
+            raise ValueError(
+                "'logprobs_format' describes how logprobs are returned, "
+                "so it requires 'logprobs' to be true"
             )
         return self
 
@@ -97,6 +105,7 @@ class CompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
     logprobs: Optional[int] = Field(None, description="Include log probabilities on the N most likely tokens. Legacy completions use an int here, not a bool", ge=0, le=20)
     logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Requires a non-zero logprobs. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
+    logprobs_format: Optional[Literal["openai", "compact"]] = Field(None, description="Accepted for symmetry with /v1/chat/completions. Legacy completions already return the flat {token: logprob} shape, so this has no effect here. UniLLM-only")
     user: Optional[str] = Field(None, description="Unique user identifier")
 
     @model_validator(mode="after")
@@ -149,8 +158,44 @@ class ChatCompletionTokenLogprob(BaseModel):
 
 
 class ChoiceLogprobs(BaseModel):
-    """Per-choice log probabilities, in OpenAI's chat completions shape."""
+    """
+    Per-choice log probabilities, in one of two shapes.
+
+    `content` is OpenAI's chat shape: one object per generated position, each holding
+    a list of alternative objects. It is what any OpenAI SDK expects to parse.
+
+    The remaining fields are UniLLM's compact shape, returned only when the caller asks
+    for `logprobs_format: "compact"`. It mirrors the flat layout the legacy
+    /v1/completions endpoint already uses — three parallel arrays, with alternatives as
+    a plain {token: logprob} map — which is roughly a third of the bytes.
+
+    Exactly one of the two is populated. Unset fields are dropped on serialization so a
+    response only ever shows the shape that was actually asked for.
+    """
     content: Optional[List[ChatCompletionTokenLogprob]] = None
+
+    # --- compact shape ---
+    format: Optional[Literal["compact"]] = None
+    tokens: Optional[List[str]] = None
+    token_logprobs: Optional[List[float]] = None
+    top_logprobs: Optional[List[Dict[str, float]]] = None
+
+    # --- set when the size cap cut the response short, in either shape ---
+    truncated: Optional[bool] = None
+    truncated_at: Optional[int] = Field(
+        None, description="Number of positions returned before the size cap stopped the response"
+    )
+
+    @model_serializer(mode="wrap")
+    def _drop_unset(self, handler):
+        """
+        Omit null fields.
+
+        Without this, every ordinary OpenAI-shaped response would also carry six null
+        keys for a compact shape it is not using, and clients that iterate the object
+        would have to know which nulls are meaningful.
+        """
+        return {k: v for k, v in handler(self).items() if v is not None}
 
 
 class Choice(BaseModel):

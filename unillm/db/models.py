@@ -104,6 +104,24 @@ class ModelPricing(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class ServerSetting(Base):
+    """
+    Admin-editable overrides for deployment settings that also live in the YAML config.
+
+    One row per setting, holding a JSON-encoded value so a single table can carry
+    ints, booleans and strings without a column per type. A row existing means an
+    admin has overridden the file; deleting the row reverts to the file (or to the
+    built-in default when the file says nothing). That is why there is no "unset"
+    sentinel value — absence *is* the unset state.
+    """
+    __tablename__ = "server_settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, nullable=False)  # JSON-encoded
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+    updated_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
 class RequestLog(Base):
     __tablename__ = "request_logs"
 

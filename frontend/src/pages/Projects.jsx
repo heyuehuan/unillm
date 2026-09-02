@@ -124,7 +124,7 @@ function KeyRow({ k, models, onRevoke, onSaved, canManage, canReveal }) {
             )}
             {k.active && canReveal && !k.recoverable && (
               <span style={{ fontSize: 11.5, color: 'var(--text-3)' }}
-                title="This key was shown once at creation and no recoverable copy was stored.">
+                title="No recoverable copy of this key was stored — it was created while key recovery was turned off for this deployment.">
                 Shown once
               </span>
             )}
@@ -198,7 +198,6 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
   const [newKeyName, setNewKeyName] = useState('')
   const [newKeyModels, setNewKeyModels] = useState([])
   const [newKeyCustom, setNewKeyCustom] = useState('')
-  const [newKeyRecoverable, setNewKeyRecoverable] = useState(false)
   const [recoverableAllowed, setRecoverableAllowed] = useState(false)
   const [justCreated, setJustCreated] = useState(null)
   const [creating, setCreating] = useState(false)
@@ -218,8 +217,8 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
   useEffect(() => {
     if (canManage) api.getModels().then(setModels).catch(() => {})
   }, [canManage])
-  // Whether this deployment permits recoverable keys at all. Hide the opt-in
-  // rather than offering a choice the server would reject.
+  // Whether this deployment stores a recoverable copy of new keys. It is not a
+  // choice made here — it decides what the creation banner can honestly promise.
   useEffect(() => {
     if (canManage) api.getConfig().then(c => setRecoverableAllowed(c.recoverable_keys_allowed)).catch(() => {})
   }, [canManage])
@@ -231,11 +230,9 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
       const res = await api.createKey(project.id, {
         name: newKeyName,
         allowed_models: combineModels(newKeyModels, newKeyCustom),
-        recoverable: newKeyRecoverable,
       })
       setJustCreated({ key: res.api_key, recoverable: res.key.recoverable })
       setShowCreate(false); setNewKeyName(''); setNewKeyModels([]); setNewKeyCustom('')
-      setNewKeyRecoverable(false)
       await loadKeys()
     } catch (e) { setError(e.message) }
     finally { setCreating(false) }
@@ -287,8 +284,8 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
                 <div style={{ fontWeight: 600, fontSize: 14 }}>API key created</div>
                 <div className="hint" style={{ marginTop: 2 }}>
                   {justCreated.recoverable
-                    ? 'A project admin can reveal this key again later.'
-                    : 'Copy it now — this is the only time it will be shown.'}
+                    ? 'Any member with developer or admin access can reveal this key again later.'
+                    : 'Copy it now — key recovery is off on this deployment, so it will not be shown again.'}
                 </div>
                 <div className="key-display" style={{ marginTop: 8 }}>
                   <span className="key-val">{justCreated.key}</span>
@@ -319,21 +316,11 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
                   custom={newKeyCustom} onCustomChange={setNewKeyCustom} />
               </div>
             </div>
-            {recoverableAllowed && (
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={newKeyRecoverable} style={{ marginTop: 2 }}
-                    onChange={e => setNewKeyRecoverable(e.target.checked)} />
-                  <span>
-                    <span style={{ fontSize: 13 }}>Let project admins reveal this key later</span>
-                    <span className="hint" style={{ display: 'block', marginTop: 2 }}>
-                      Stores an encrypted copy so the key can be read back. Leave this off and the
-                      key is shown once here and nowhere else — safer, but a lost key must be replaced.
-                    </span>
-                  </span>
-                </label>
-              </div>
-            )}
+            <div className="hint" style={{ marginBottom: 14 }}>
+              {recoverableAllowed
+                ? 'This deployment keeps an encrypted copy, so members with developer or admin access can reveal the key again later.'
+                : 'Key recovery is off on this deployment, so the key is shown once at creation and nowhere else.'}
+            </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button type="button" className="btn" onClick={() => setShowCreate(false)}>Cancel</button>
               <button type="submit" className="btn primary" disabled={creating}>{creating ? 'Creating…' : 'Create key'}</button>
@@ -380,8 +367,8 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
 
 // ── Members tab ───────────────────────────────────────────
 const ROLES = [
-  { id: 'admin', hint: 'Manage members and keys, reveal key plaintext' },
-  { id: 'developer', hint: 'View and use project keys' },
+  { id: 'admin', hint: 'Manage members and keys' },
+  { id: 'developer', hint: 'View, use and reveal project keys' },
   { id: 'viewer', hint: 'See the project, no key access' },
 ]
 
@@ -643,9 +630,10 @@ function ProjectDetail({ projectId, user, tab }) {
   const myProjectRole = isGlobalAdmin ? 'admin' : (myMembership?.role ?? 'viewer')
   const canManage = myProjectRole === 'admin'
   const canSeeKeys = myProjectRole !== 'viewer'
-  // Revealing key plaintext is admin-only on the backend; don't offer the button
-  // to developers only for it to 403.
-  const canReveal = myProjectRole === 'admin'
+  // Same line as seeing the keys at all: a developer already holds these keys in
+  // their client config, so reading one back here is not a new capability. Viewers
+  // get neither.
+  const canReveal = canSeeKeys
   const activeTab = tab === 'members' ? 'members' : 'keys'
 
   return (

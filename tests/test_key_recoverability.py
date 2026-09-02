@@ -1,14 +1,15 @@
 """
-Per-key reveal opt-in.
+Key recovery is a deployment-wide setting.
 
-Every API key used to be stored Fernet-encrypted so that a project admin could
-read it back later. That made the database hold a recoverable copy of every key
-in the system, and with no dedicated UNILLM_ENCRYPTION_KEY the Fernet key is
-derived from the JWT secret — so one host compromise recovered all of them.
+Whether an API key can be read back later is decided once, by
+UNILLM_RECOVERABLE_KEYS, and applies to every key alike — keys created through the
+console, and the personal key each account is given at creation. It defaults to on.
 
-Recoverability is now a per-key decision made at creation and defaulting to off,
-under a deployment-wide veto (UNILLM_RECOVERABLE_KEYS=false) that turns the whole
-feature off. These tests pin all three layers: the default, the opt-in, and the veto.
+It used to be a per-key opt-in defaulting to off, which meant two keys sitting in
+the same list behaved differently at the moment somebody needed one back, and the
+auto-created personal key could never be recovered at all. These tests pin the
+current rule: the flag decides, nothing else, and turning it off stops reveal for
+keys that already carry ciphertext as well as for new ones.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -62,98 +63,85 @@ def _create_key(client, token, project_id, name, **extra):
                        json={"name": name, **extra}, headers=_auth(token))
 
 
-# --- the default is show-once ----------------------------------------------------
+# --- recovery is on by default ---------------------------------------------------
 
-def test_keys_are_not_recoverable_by_default(client, admin_token, project_id, db):
-    r = _create_key(client, admin_token, project_id, "default-key")
+def test_a_new_key_is_recoverable(client, admin_token, project_id, db):
+    r = _create_key(client, admin_token, project_id, "ordinary-key")
     assert r.status_code == 201
     body = r.json()
-    assert body["api_key"].startswith("sk-")     # plaintext is returned once, here
-    assert body["key"]["recoverable"] is False
+    assert body["api_key"].startswith("sk-")
+    assert body["key"]["recoverable"] is True
 
-    # Nothing decryptable was written. This is the property that matters: an
-    # attacker with the database and the secret still cannot produce this key.
     row = db.query(APIKey).filter(APIKey.id == body["key"]["id"]).first()
     db.refresh(row)
-    assert row.key_ciphertext is None
+    assert row.key_ciphertext is not None
 
 
-def test_revealing_a_show_once_key_returns_404(client, admin_token, project_id):
-    key_id = _create_key(client, admin_token, project_id, "no-reveal").json()["key"]["id"]
-    r = client.get(f"/api/keys/{key_id}/reveal", headers=_auth(admin_token))
-    assert r.status_code == 404
-    assert "revoke" in r.json()["detail"].lower()   # tells the admin what to do instead
+def test_revealing_returns_the_actual_key(client, admin_token, project_id):
+    created = _create_key(client, admin_token, project_id, "reveal-me").json()
+    r = client.get(f"/api/keys/{created['key']['id']}/reveal", headers=_auth(admin_token))
+    assert r.status_code == 200
+    # The value has to be the key itself, not merely something well-formed.
+    assert r.json()["api_key"] == created["api_key"]
 
 
-def test_seeded_personal_key_is_not_recoverable(client, db):
-    """A user's auto-created personal key is printed once, so it must not be stored."""
+def test_the_seeded_personal_key_is_recoverable_too(client, db):
+    """
+    The key handed out with a new account is the one most likely to be mislaid,
+    since nobody chose to create it. It follows the same rule as every other key.
+    """
     user, plaintext = crud.create_user(db=db, username="rec-personal",
                                        hashed_password=hash_password("personal1"))
     assert plaintext.startswith("sk-")
     row = db.query(APIKey).filter(APIKey.project_id == user.personal_project_id).first()
-    assert row.key_ciphertext is None
-
-
-# --- opting a single key in ------------------------------------------------------
-
-def test_a_key_can_opt_in_and_then_be_revealed(client, admin_token, project_id):
-    r = _create_key(client, admin_token, project_id, "reveal-me", recoverable=True)
-    body = r.json()
-    assert body["key"]["recoverable"] is True
-
-    revealed = client.get(f"/api/keys/{body['key']['id']}/reveal", headers=_auth(admin_token))
-    assert revealed.status_code == 200
-    # The revealed value must be the actual key, not merely well-formed.
-    assert revealed.json()["api_key"] == body["api_key"]
-
-
-def test_opting_one_key_in_does_not_affect_others(client, admin_token, project_id):
-    opted = _create_key(client, admin_token, project_id, "opted", recoverable=True).json()["key"]
-    plain = _create_key(client, admin_token, project_id, "plain").json()["key"]
-    assert client.get(f"/api/keys/{opted['id']}/reveal", headers=_auth(admin_token)).status_code == 200
-    assert client.get(f"/api/keys/{plain['id']}/reveal", headers=_auth(admin_token)).status_code == 404
+    assert row.key_ciphertext is not None
+    assert crud.decrypt_api_key(row.key_ciphertext) == plaintext
 
 
 def test_key_listing_reports_recoverability(client, admin_token, project_id):
     """The console needs this to show Reveal only where it will work."""
     keys = client.get(f"/api/projects/{project_id}/keys", headers=_auth(admin_token)).json()
-    by_name = {k["name"]: k for k in keys}
-    assert by_name["reveal-me"]["recoverable"] is True
-    assert by_name["default-key"]["recoverable"] is False
+    assert keys and all(k["recoverable"] is True for k in keys)
 
 
-def test_the_choice_is_audited(client, admin_token, project_id, db):
-    _create_key(client, admin_token, project_id, "audited-recoverable", recoverable=True)
-    _create_key(client, admin_token, project_id, "audited-show-once")
+def test_creation_is_audited_with_the_outcome(client, admin_token, project_id, db):
+    _create_key(client, admin_token, project_id, "audited-key")
     rows, _ = crud.query_audit_logs(db, action="api_key_created")
     by_name = {r.detail["name"]: r.detail for r in rows if r.detail}
-    assert by_name["audited-recoverable"]["recoverable"] is True
-    assert by_name["audited-show-once"]["recoverable"] is False
+    assert by_name["audited-key"]["recoverable"] is True
 
 
-# --- the deployment-wide veto ----------------------------------------------------
+# --- turning the deployment switch off --------------------------------------------
 
-def test_veto_refuses_to_create_a_recoverable_key(client, admin_token, project_id, monkeypatch):
+def test_switching_recovery_off_stops_new_keys_storing_anything(client, admin_token, project_id, db, monkeypatch):
     monkeypatch.setenv("UNILLM_RECOVERABLE_KEYS", "false")
-    r = _create_key(client, admin_token, project_id, "vetoed", recoverable=True)
-    assert r.status_code == 400
-    assert "disabled" in r.json()["detail"].lower()
-
-
-def test_veto_still_allows_ordinary_show_once_keys(client, admin_token, project_id, monkeypatch):
-    monkeypatch.setenv("UNILLM_RECOVERABLE_KEYS", "false")
-    r = _create_key(client, admin_token, project_id, "still-fine")
+    r = _create_key(client, admin_token, project_id, "show-once")
     assert r.status_code == 201
     assert r.json()["api_key"].startswith("sk-")
+    assert r.json()["key"]["recoverable"] is False
+
+    row = db.query(APIKey).filter(APIKey.id == r.json()["key"]["id"]).first()
+    db.refresh(row)
+    assert row.key_ciphertext is None
 
 
-def test_veto_hides_reveal_for_keys_encrypted_before_it_was_set(client, admin_token, project_id, monkeypatch):
+def test_a_key_created_while_recovery_was_off_cannot_be_revealed_later(client, admin_token, project_id, monkeypatch):
+    """Turning the switch back on cannot reach backwards: nothing was stored."""
+    monkeypatch.setenv("UNILLM_RECOVERABLE_KEYS", "false")
+    key_id = _create_key(client, admin_token, project_id, "nothing-stored").json()["key"]["id"]
+    monkeypatch.setenv("UNILLM_RECOVERABLE_KEYS", "true")
+    r = client.get(f"/api/keys/{key_id}/reveal", headers=_auth(admin_token))
+    assert r.status_code == 404
+    assert "revoke" in r.json()["detail"].lower()   # tells the admin what to do instead
+
+
+def test_switching_recovery_off_hides_keys_encrypted_before_it_was_set(client, admin_token, project_id, monkeypatch):
     """
     Turning the switch off must take effect immediately, including for keys that
     already carry ciphertext — otherwise disabling it would not actually stop
     anyone reading existing keys back.
     """
-    key_id = _create_key(client, admin_token, project_id, "pre-existing", recoverable=True).json()["key"]["id"]
+    key_id = _create_key(client, admin_token, project_id, "pre-existing").json()["key"]["id"]
     assert client.get(f"/api/keys/{key_id}/reveal", headers=_auth(admin_token)).status_code == 200
 
     monkeypatch.setenv("UNILLM_RECOVERABLE_KEYS", "false")
@@ -164,7 +152,7 @@ def test_veto_hides_reveal_for_keys_encrypted_before_it_was_set(client, admin_to
 
 # --- what the console asks for ---------------------------------------------------
 
-def test_config_endpoint_reports_the_veto(client, admin_token, monkeypatch):
+def test_config_endpoint_reports_the_setting(client, admin_token, monkeypatch):
     assert client.get("/api/config", headers=_auth(admin_token)).json()["recoverable_keys_allowed"] is True
     monkeypatch.setenv("UNILLM_RECOVERABLE_KEYS", "false")
     assert client.get("/api/config", headers=_auth(admin_token)).json()["recoverable_keys_allowed"] is False

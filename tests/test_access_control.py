@@ -117,10 +117,14 @@ def test_viewer_can_read_but_not_manage(client, env):
                        json={"name": "x"}).status_code == 403
 
 
-def test_developer_cannot_reveal_or_manage_keys(client, env):
+def test_developer_can_use_keys_but_not_manage_them(client, env):
+    """
+    A developer reads the project's keys, including revealing one (they already
+    hold it), but cannot revoke a key or change who is on the project.
+    """
     pid, kid = env["project_id"], env["key_id"]
     assert client.get(f"/api/projects/{pid}", headers=_auth(env["dev"])).status_code == 200
-    assert client.get(f"/api/keys/{kid}/reveal", headers=_auth(env["dev"])).status_code == 403
+    assert client.get(f"/api/keys/{kid}/reveal", headers=_auth(env["dev"])).status_code == 200
     assert client.delete(f"/api/keys/{kid}", headers=_auth(env["dev"])).status_code == 403
     assert client.post(f"/api/projects/{pid}/members", headers=_auth(env["dev"]),
                        json={"user_id": env["out_id"], "role": "admin"}).status_code == 403

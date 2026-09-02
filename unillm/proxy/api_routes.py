@@ -142,10 +142,6 @@ class APIKeyResponse(BaseModel):
 class CreateAPIKeyRequest(BaseModel):
     name: str = Field(..., max_length=_MAX_NAME_LEN)
     allowed_models: Optional[List[str]] = Field(None, max_length=_MAX_MODEL_LIST_LEN)  # None → ["all"]
-    # Opt in to storing an encrypted copy so a project admin can read this key back
-    # later. Off by default: a key nobody can read back cannot leak from the
-    # database, and the plaintext is right there in this call's response.
-    recoverable: bool = False
 
 
 class CreateAPIKeyResponse(BaseModel):
@@ -970,19 +966,12 @@ def create_api_key(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This project is archived. Restore it before creating keys.",
         )
-    if req.recoverable and not recoverable_keys_allowed():
-        # Fail loudly. Silently creating a show-once key would leave the caller
-        # believing they can retrieve it later, and they would find out only after
-        # losing it.
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Recoverable keys are disabled on this deployment (UNILLM_RECOVERABLE_KEYS=false)",
-        )
     key_obj, plaintext_key = crud.create_api_key(
         db, project_id=project_id, name=req.name, allowed_models=req.allowed_models,
-        recoverable=req.recoverable,
     )
-    # Recoverability is a security-relevant choice, so record which way it went.
+    # Recoverability is set by the deployment rather than by this call, but record
+    # which way it went for this key: it is what decides whether the plaintext can
+    # ever come back out of the database.
     _audit(db, "api_key_created", request, user=current_user,
            resource_type="api_key", resource_id=str(key_obj.id),
            detail={"name": key_obj.name, "project_id": project_id,
@@ -1034,18 +1023,27 @@ def reveal_api_key(
     key = db.query(APIKey).filter(APIKey.id == key_id).first()
     if not key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key not found")
-    # Revealing plaintext is the most sensitive read in the system: restrict to
-    # project admins (or global admins), and always record it in the audit trail.
+    # Anyone who may use a project's keys may also read one back: developers hold
+    # the plaintext already — it is in their client config — so withholding it here
+    # only pushed them towards keeping private copies. Viewers are the line, and
+    # they are refused the key list entirely. Every reveal is audited.
     role = crud.get_user_project_role(db, current_user.id, key.project_id)
-    if role != "admin" and current_user.global_role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
-    if not key.key_ciphertext or not recoverable_keys_allowed():
-        # Either the key was created show-once, or the deployment has since
-        # withdrawn recoverability altogether. Same answer both ways: there is
-        # nothing here to give back.
+    if role not in ("admin", "developer") and current_user.global_role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You need developer or admin access to this project",
+        )
+    if not recoverable_keys_allowed():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="This key was created without recovery. Revoke it and create a new one.",
+            detail="Key recovery is turned off on this deployment (UNILLM_RECOVERABLE_KEYS=false)",
+        )
+    if not key.key_ciphertext:
+        # A key minted while recovery was off, so nothing was ever stored to give
+        # back. Turning the flag on cannot reach backwards.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This key was created while recovery was off. Revoke it and create a new one.",
         )
     try:
         plaintext = crud.decrypt_api_key(key.key_ciphertext)

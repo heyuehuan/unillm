@@ -68,21 +68,21 @@ def get_fernet_key() -> bytes:
 
 def recoverable_keys_allowed() -> bool:
     """
-    Whether this deployment permits recoverable API keys at all.
+    Whether this deployment keeps API keys in a form that can be read back.
 
-    Recoverability is decided per key at creation time, and defaults to off: a new
-    key is shown once and never stored in a form anyone can read back. A creator
-    who needs to retrieve it later can opt that single key in, which stores a
-    Fernet-encrypted copy for the admin-only, audited /api/keys/{id}/reveal.
-
-    This flag is the deployment-wide veto over that choice. UNILLM_RECOVERABLE_KEYS
-    defaults to "true", meaning the option is available; set it to "false" (or
-    "0"/"no"/"off") and no key can be created recoverable and reveal returns 404
-    for every key, including ones encrypted before the flag was turned off.
+    This is the only thing that decides it. UNILLM_RECOVERABLE_KEYS defaults to
+    "true": every new key is stored with a Fernet-encrypted copy alongside its
+    hash, and the audited /api/keys/{id}/reveal hands that copy back to a project
+    developer or admin. Set it to "false" (or "0"/"no"/"off") and nothing
+    decryptable is written for any new key, while reveal returns 404 for every
+    key — including ones encrypted before the flag was turned off.
 
     It matters because a recoverable key is plaintext the database can give back.
     With no dedicated UNILLM_ENCRYPTION_KEY the Fernet key is derived from the JWT
-    secret, so whoever holds the database and the environment holds the keys.
+    secret, so whoever holds the database and the environment holds the keys. The
+    trade is deliberate: a key that cannot be recovered has to be replaced when it
+    is mislaid, and replacing the key an account was issued at creation is work
+    somebody has to do by hand.
     """
     return os.getenv("UNILLM_RECOVERABLE_KEYS", "true").strip().lower() not in ("false", "0", "no", "off")
 

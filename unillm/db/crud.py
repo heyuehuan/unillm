@@ -47,16 +47,19 @@ def _generate_api_key() -> str:
     return "sk-" + secrets.token_urlsafe(36)
 
 
-def _maybe_encrypt_api_key(plaintext: str, recoverable: bool) -> Optional[str]:
+def _maybe_encrypt_api_key(plaintext: str) -> Optional[str]:
     """
     Ciphertext for later reveal, or None.
 
-    Storing nothing is the default and the safe case: a key with no ciphertext
-    cannot be read back out of the database by anyone, ever. Both gates must be
-    open — the deployment has to permit recoverable keys, and this particular key
-    has to have asked for it.
+    Recoverability is a property of the deployment, not of the individual key:
+    UNILLM_RECOVERABLE_KEYS decides it once, for every key alike. A per-key opt-in
+    only ever produced keys that looked identical in the console but behaved
+    differently when someone needed one back, which is the moment to be predictable.
+
+    Turning the flag off stops new keys from storing anything, and leaves nothing
+    for anyone to read out of the database.
     """
-    if not recoverable or not recoverable_keys_allowed():
+    if not recoverable_keys_allowed():
         return None
     return encrypt_api_key(plaintext)
 
@@ -334,9 +337,7 @@ def _provision_personal_project(db: Session, user: User) -> str:
         name="default",
         key_hash=_hash_key(plaintext_key),
         key_prefix=plaintext_key[:8],
-        # The personal key is printed once at creation; it is not stored in a
-        # recoverable form, so a lost one is replaced rather than revealed.
-        key_ciphertext=_maybe_encrypt_api_key(plaintext_key, recoverable=False),
+        key_ciphertext=_maybe_encrypt_api_key(plaintext_key),
         allowed_models=["all"],
     ))
     return plaintext_key
@@ -514,14 +515,14 @@ def create_api_key(
     project_id: int,
     name: str,
     allowed_models: Optional[List[str]] = None,
-    recoverable: bool = False,
 ) -> Tuple[APIKey, str]:
     """
     Create an API key for a project.
-    Returns (api_key, plaintext_key) — plaintext shown once.
+    Returns (api_key, plaintext_key) — plaintext also returned for the creation response.
     allowed_models: ["all"] = unrestricted, [] = no access, ["model-a"] = specific
-    recoverable: store an encrypted copy so a project admin can reveal it later.
-      Off by default, so the plaintext exists only in the creation response.
+
+    Whether an encrypted copy is kept for a later reveal is decided by the
+    deployment (UNILLM_RECOVERABLE_KEYS), not by the caller.
     """
     if allowed_models is None:
         allowed_models = ["all"]
@@ -532,7 +533,7 @@ def create_api_key(
         name=name,
         key_hash=_hash_key(plaintext_key),
         key_prefix=plaintext_key[:8],
-        key_ciphertext=_maybe_encrypt_api_key(plaintext_key, recoverable=recoverable),
+        key_ciphertext=_maybe_encrypt_api_key(plaintext_key),
         allowed_models=allowed_models,
     )
     db.add(api_key)

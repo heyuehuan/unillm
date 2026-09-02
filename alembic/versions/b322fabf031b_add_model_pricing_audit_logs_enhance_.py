@@ -58,9 +58,15 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('ip_address', sa.String(), nullable=True))
         batch_op.add_column(sa.Column('backend_model', sa.String(), nullable=True))
         batch_op.add_column(sa.Column('model_type', sa.String(), nullable=True))
-        batch_op.add_column(sa.Column('stream', sa.Boolean(), nullable=False))
+        # server_default, not just default: the ORM-level default only applies to
+        # rows this application inserts, so adding a NOT NULL column without one
+        # fails on any database that already has request_logs rows — which is
+        # every deployment upgrading rather than installing fresh.
+        batch_op.add_column(sa.Column('stream', sa.Boolean(), nullable=False,
+                                      server_default=sa.false()))
         batch_op.add_column(sa.Column('error_message', sa.String(), nullable=True))
-        batch_op.add_column(sa.Column('total_tokens', sa.Integer(), nullable=False))
+        batch_op.add_column(sa.Column('total_tokens', sa.Integer(), nullable=False,
+                                      server_default='0'))
         batch_op.add_column(sa.Column('cost_usd', sa.Float(), nullable=True))
         batch_op.create_index(batch_op.f('ix_request_logs_request_id'), ['request_id'], unique=True)
 

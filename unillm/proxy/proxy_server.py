@@ -227,11 +227,31 @@ app = FastAPI(
 # comma-separated allowlist (e.g. "https://app.example.com") to permit cross-origin use.
 # Bearer-token auth does not need credentialed CORS, so credentials stay off unless an
 # explicit origin allowlist is configured.
-_cors_origins = [o.strip() for o in os.getenv("UNILLM_CORS_ORIGINS", "").split(",") if o.strip()]
+def cors_settings(raw: str):
+    """
+    Turn UNILLM_CORS_ORIGINS into (origins, allow_credentials).
+
+    "*" together with credentials is the one combination that must never ship.
+    Starlette implements that pair by echoing back whichever Origin asked, which
+    turns "any site may read public data" into "any site may make authenticated
+    requests as the logged-in user" — exactly what the same-origin policy exists to
+    stop. A wildcard is honoured, but it costs the credentials.
+    """
+    origins = [o.strip() for o in (raw or "").split(",") if o.strip()]
+    return origins, bool(origins) and "*" not in origins
+
+
+_cors_origins, _cors_allow_credentials = cors_settings(os.getenv("UNILLM_CORS_ORIGINS", ""))
+if _cors_origins and not _cors_allow_credentials:
+    verbose_proxy_logger.warning(
+        "UNILLM_CORS_ORIGINS contains '*', so credentialed cross-origin requests are "
+        "disabled. List the origins that need them explicitly."
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=bool(_cors_origins),
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

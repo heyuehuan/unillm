@@ -343,11 +343,11 @@ def get_projects_for_user(db: Session, user_id: int, is_admin: bool = False,
     if not include_archived:
         q = q.filter(Project.archived == False)
     if is_admin:
-        return q.order_by(Project.created_at.desc()).all()
+        return q.order_by(Project.created_at.desc(), Project.id.desc()).all()
     return (
         q.join(UserProjectAccess, UserProjectAccess.project_id == Project.id)
         .filter(UserProjectAccess.user_id == user_id)
-        .order_by(Project.created_at.desc())
+        .order_by(Project.created_at.desc(), Project.id.desc())
         .all()
     )
 
@@ -503,7 +503,7 @@ def get_api_keys_for_project(db: Session, project_id: int) -> List[APIKey]:
     return (
         db.query(APIKey)
         .filter(APIKey.project_id == project_id)
-        .order_by(APIKey.active.desc(), APIKey.created_at.desc())
+        .order_by(APIKey.active.desc(), APIKey.created_at.desc(), APIKey.id.desc())
         .all()
     )
 
@@ -648,7 +648,11 @@ def query_request_logs(
     if to_date is not None:
         q = q.filter(RequestLog.created_at <= to_date)
     total = q.count()
-    rows = q.order_by(RequestLog.created_at.desc()).offset(offset).limit(limit).all()
+    # id breaks the tie. Rows written in the same clock tick have no inherent order,
+    # so paging with OFFSET could hand back a row twice and skip another one — the
+    # database is free to order the equal group differently on each query.
+    rows = (q.order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+             .offset(offset).limit(limit).all())
     return rows, total
 
 
@@ -674,7 +678,8 @@ def query_audit_logs(
     if to_date is not None:
         q = q.filter(AuditLog.created_at <= to_date)
     total = q.count()
-    rows = q.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    rows = (q.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+             .offset(offset).limit(limit).all())
     return rows, total
 
 
@@ -866,7 +871,7 @@ def get_models_summary(db: Session, configured_models: list = None) -> List[Dict
         recent = (
             db.query(RequestLog.status_code, RequestLog.created_at)
             .filter(RequestLog.model == name)
-            .order_by(RequestLog.created_at.desc())
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
             .limit(10)
             .all()
         )

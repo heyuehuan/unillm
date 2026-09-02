@@ -3,9 +3,10 @@ Covers the two ways a logprobs response is kept small.
 
 - `logprobs_format: "compact"`, the flat {token: logprob} shape
 - `logprobs_max_bytes`, the per-request size cap
+- `logprobs_last_n`, returning only the final N positions
 
-Between them they touch four layers, all exercised here: the conversion and budget
-helpers, the ChoiceLogprobs serializer that hides the unused shape, the settings
+Between them they touch four layers, all exercised here: the conversion, window and
+budget helpers, the ChoiceLogprobs serializer that hides the unused shape, the settings
 resolution chain (database over config file over built-in default) with its admin
 endpoints, and both completion endpoints end to end, streaming and not.
 """
@@ -25,6 +26,10 @@ from unillm.llm.logprobs import (
     compact_chat_payload,
     compact_choice_logprobs,
     compact_stream_chunk,
+    bounded_positions,
+    LastNWindow,
+    last_n_choice_logprobs,
+    last_n_logprobs_payload,
     min_bytes_estimate,
 )
 from unillm.proxy import server_settings
@@ -631,3 +636,332 @@ def test_a_stream_under_the_cap_is_untouched(client, api_key, stub_backend, db):
     parsed = _stream_logprobs(client, api_key, stub_backend, [_chunk() for _ in range(5)])
     assert all(len(c["choices"][0]["logprobs"]["content"]) == 1 for c in parsed)
     assert not any("truncated" in c["choices"][0]["logprobs"] for c in parsed)
+
+
+# ---------------------------------------------------------------------------
+# Tail selection: logprobs_last_n
+# ---------------------------------------------------------------------------
+
+def test_last_n_keeps_the_final_positions():
+    logprobs = ChoiceLogprobs(content=[_entry(t, -0.1) for t in "abcde"])
+    assert [e.token for e in last_n_choice_logprobs(logprobs, 2).content] == ["d", "e"]
+
+
+def test_last_n_of_one_is_the_final_token_alone():
+    logprobs = ChoiceLogprobs(content=[_entry(t, -0.1) for t in "abcde"])
+    assert [e.token for e in last_n_choice_logprobs(logprobs, 1).content] == ["e"]
+
+
+def test_last_n_larger_than_the_response_returns_everything():
+    logprobs = ChoiceLogprobs(content=[_entry(t, -0.1) for t in "ab"])
+    assert len(last_n_choice_logprobs(logprobs, 10).content) == 2
+
+
+def test_last_n_of_none_changes_nothing():
+    logprobs = ChoiceLogprobs(content=[_entry(t, -0.1) for t in "abc"])
+    assert len(last_n_choice_logprobs(logprobs, None).content) == 3
+
+
+def test_last_n_slices_the_compact_shape_too():
+    """All three parallel arrays have to stay the same length as each other."""
+    logprobs = ChoiceLogprobs(format="compact", tokens=["a", "b", "c"],
+                              token_logprobs=[-0.1, -0.2, -0.3],
+                              top_logprobs=[{"a": -0.1}, {"b": -0.2}, {"c": -0.3}])
+    out = last_n_choice_logprobs(logprobs, 2)
+    assert out.tokens == ["b", "c"]
+    assert out.token_logprobs == [-0.2, -0.3]
+    assert out.top_logprobs == [{"b": -0.2}, {"c": -0.3}]
+
+
+def test_last_n_slices_the_legacy_shape_including_offsets():
+    """text_offset indexes the tokens beside it, so it cannot be left at full length."""
+    payload = {"tokens": ["a", "b", "c"], "token_logprobs": [-0.1, -0.2, -0.3],
+               "top_logprobs": [{"a": -0.1}, {"b": -0.2}, {"c": -0.3}],
+               "text_offset": [0, 1, 2]}
+    out = last_n_logprobs_payload(payload, 2)
+    assert out["tokens"] == ["b", "c"]
+    assert out["text_offset"] == [1, 2]
+
+
+def test_last_n_keeps_absolute_text_offsets():
+    """The window is the tail, so its offsets should still point into the full text."""
+    payload = {"tokens": ["a", "b", "c"], "token_logprobs": [-0.1, -0.2, -0.3],
+               "top_logprobs": [{}, {}, {}], "text_offset": [0, 7, 14]}
+    assert last_n_logprobs_payload(payload, 1)["text_offset"] == [14]
+
+
+def test_last_n_slices_a_dict_chat_payload():
+    payload = {"content": [{"token": t, "logprob": -0.1} for t in "abc"]}
+    assert [e["token"] for e in last_n_logprobs_payload(payload, 2)["content"]] == ["b", "c"]
+
+
+# --- position bound and pre-flight estimate ---
+
+def test_the_position_bound_takes_the_smaller_of_the_two():
+    assert bounded_positions(100, 3) == 3
+    assert bounded_positions(2, 50) == 2
+
+
+def test_either_bound_alone_is_a_bound():
+    assert bounded_positions(None, 5) == 5
+    assert bounded_positions(5, None) == 5
+
+
+def test_neither_bound_leaves_the_request_unbounded():
+    assert bounded_positions(None, None) is None
+
+
+def test_last_n_makes_an_open_ended_request_estimable():
+    """Without max_tokens there was no honest floor; last_n supplies one on its own."""
+    assert min_bytes_estimate(None, 20, OPENAI_FORMAT) is None
+    assert min_bytes_estimate(None, 20, OPENAI_FORMAT, last_n=1) is not None
+
+
+def test_last_n_shrinks_the_estimate():
+    full = min_bytes_estimate(1000, 20, OPENAI_FORMAT)
+    windowed = min_bytes_estimate(1000, 20, OPENAI_FORMAT, last_n=5)
+    assert windowed * 100 < full
+
+
+# --- streaming window ---
+
+def _lp_chunk(token, index=0):
+    return {"id": "x", "object": "chat.completion.chunk", "model": "m",
+            "choices": [{"index": index, "delta": {"content": token}, "logprobs": {
+                "content": [{"token": token, "logprob": -0.1, "top_logprobs": []}]}}]}
+
+
+def test_the_window_strips_logprobs_from_passing_chunks():
+    window = LastNWindow(2)
+    chunk = window.capture(_lp_chunk("a"))
+    assert chunk["choices"][0]["logprobs"] is None
+
+
+def test_the_window_leaves_content_deltas_alone():
+    """Only the logprobs are deferred; the text still streams at full speed."""
+    window = LastNWindow(1)
+    chunk = window.capture(_lp_chunk("hello"))
+    assert chunk["choices"][0]["delta"] == {"content": "hello"}
+
+
+def test_the_window_emits_only_the_last_n_at_the_end():
+    window = LastNWindow(2)
+    for token in "abcde":
+        window.capture(_lp_chunk(token))
+    final = window.flush()
+    tokens = [e["token"] for e in final["choices"][0]["logprobs"]["content"]]
+    assert tokens == ["d", "e"]
+
+
+def test_the_window_keeps_choices_apart():
+    """`n: 4` interleaves four choices down one connection; each gets its own window."""
+    window = LastNWindow(1)
+    for token in "ab":
+        window.capture(_lp_chunk(token, index=0))
+    for token in "xy":
+        window.capture(_lp_chunk(token, index=1))
+    choices = window.flush()["choices"]
+    assert [c["index"] for c in choices] == [0, 1]
+    assert choices[0]["logprobs"]["content"][0]["token"] == "b"
+    assert choices[1]["logprobs"]["content"][0]["token"] == "y"
+
+
+def test_the_window_reuses_the_stream_identity():
+    window = LastNWindow(1)
+    window.capture(_lp_chunk("a"))
+    final = window.flush()
+    assert final["id"] == "x" and final["model"] == "m"
+    assert final["object"] == "chat.completion.chunk"
+
+
+def test_the_window_emits_nothing_when_no_logprobs_were_served():
+    window = LastNWindow(2)
+    window.capture({"id": "x", "choices": [{"index": 0, "delta": {"content": "a"}}]})
+    assert window.flush() is None
+
+
+def test_the_window_buffers_the_legacy_shape():
+    window = LastNWindow(2)
+    for i, token in enumerate("abc"):
+        window.capture({"id": "x", "object": "text_completion", "choices": [
+            {"index": 0, "text": token, "logprobs": {
+                "tokens": [token], "token_logprobs": [-0.1 * i],
+                "top_logprobs": [{token: -0.1 * i}], "text_offset": [i]}}]})
+    choice = window.flush()["choices"][0]
+    assert choice["logprobs"]["tokens"] == ["b", "c"]
+    assert choice["logprobs"]["text_offset"] == [1, 2]
+    # A text chunk carries `text`, not `delta`; the wrong key makes it unparseable.
+    assert choice["text"] == "" and "delta" not in choice
+
+
+# --- request validation ---
+
+def test_last_n_without_logprobs_is_rejected():
+    with pytest.raises(ValueError, match="logprobs_last_n"):
+        ChatCompletionRequest(model="m", messages=[{"role": "user", "content": "hi"}],
+                              logprobs_last_n=1)
+
+
+def test_a_zero_length_window_is_rejected():
+    """Asking for the last zero positions is asking for nothing, which is not a window."""
+    with pytest.raises(ValueError):
+        ChatCompletionRequest(model="m", messages=[{"role": "user", "content": "hi"}],
+                              logprobs=True, logprobs_last_n=0)
+
+
+def test_last_n_is_accepted_alongside_the_other_logprob_options():
+    request = ChatCompletionRequest(
+        model="m", messages=[{"role": "user", "content": "hi"}],
+        logprobs=True, top_logprobs=5, logprobs_last_n=3,
+        logprobs_min_p=0.01, logprobs_format="compact")
+    assert request.logprobs_last_n == 3
+
+
+def test_the_legacy_endpoint_allows_a_window_with_no_alternatives():
+    """`logprobs: 0` still returns the chosen tokens' own logprobs, so a window applies."""
+    request = CompletionRequest(model="m", prompt="hi", logprobs=0, logprobs_last_n=1)
+    assert request.logprobs_last_n == 1
+
+
+def test_the_legacy_endpoint_rejects_a_window_with_no_logprobs():
+    with pytest.raises(ValueError, match="logprobs_last_n"):
+        CompletionRequest(model="m", prompt="hi", logprobs_last_n=1)
+
+
+# --- end to end ---
+
+def test_only_the_last_n_positions_come_back(client, api_key, monkeypatch, db):
+    import unillm.proxy.proxy_server as ps
+
+    handler = MagicMock()
+    handler.SUPPORTED_CHAT_PARAMS = frozenset({"logprobs", "top_logprobs"})
+    handler.chat_completion = AsyncMock(return_value=_chat_response(n_positions=200))
+    monkeypatch.setattr(ps, "_get_handler_for_model", lambda m: handler)
+    monkeypatch.setattr(ps.proxy_config, "model_list", [
+        {"model_name": "lp-on", "unillm_params": {
+            "model": "gemini-2.5-flash", "supports_logprobs": True}},
+    ])
+    monkeypatch.setattr(ps, "general_settings", {})
+
+    r = _post(client, api_key, logprobs=True, top_logprobs=2, logprobs_last_n=3)
+    assert r.status_code == 200
+    content = r.json()["choices"][0]["logprobs"]["content"]
+    assert [e["token"] for e in content] == ["tok197", "tok198", "tok199"]
+
+
+def test_a_window_combines_with_the_compact_format(client, api_key, stub_backend, db):
+    stub_backend.chat_completion = AsyncMock(return_value=_chat_response(n_positions=50))
+    r = _post(client, api_key, logprobs=True, top_logprobs=2,
+              logprobs_last_n=1, logprobs_format="compact")
+    logprobs = r.json()["choices"][0]["logprobs"]
+    assert logprobs["tokens"] == ["tok49"]
+    assert logprobs["top_logprobs"] == [{"Yes": -0.05, "No": -3.2}]
+
+
+def test_the_window_is_not_forwarded_to_the_backend(client, api_key, stub_backend, db):
+    """No provider takes this parameter, so sending it would be a 400 from upstream."""
+    _post(client, api_key, logprobs=True, top_logprobs=2, logprobs_last_n=1)
+    assert "logprobs_last_n" not in stub_backend.chat_completion.call_args.kwargs
+
+
+def test_a_window_makes_a_refused_request_fit(client, api_key, stub_backend, db):
+    over = dict(logprobs=True, top_logprobs=20, max_tokens=200000)
+    assert _post(client, api_key, **over).status_code == 413
+    assert _post(client, api_key, logprobs_last_n=1, **over).status_code == 200
+
+
+def test_the_refusal_points_at_the_window(client, api_key, stub_backend, db):
+    r = _post(client, api_key, logprobs=True, top_logprobs=20, max_tokens=200000)
+    assert "logprobs_last_n" in r.json()["detail"]
+
+
+def test_a_streamed_window_arrives_in_one_chunk_at_the_end(client, api_key, stub_backend, db):
+    parsed = _stream_logprobs(client, api_key, stub_backend,
+                              [_chunk() for _ in range(10)], logprobs_last_n=2)
+    carrying = [c for c in parsed if c["choices"][0].get("logprobs")]
+    assert len(carrying) == 1
+    assert carrying[0] is parsed[-1]
+    assert len(carrying[0]["choices"][0]["logprobs"]["content"]) == 2
+
+
+def test_a_streamed_window_still_delivers_every_content_delta(client, api_key, stub_backend, db):
+    """Deferring the logprobs must not defer or drop the text."""
+    parsed = _stream_logprobs(client, api_key, stub_backend,
+                              [_chunk() for _ in range(10)], logprobs_last_n=1)
+    text = "".join(c["choices"][0]["delta"].get("content", "") for c in parsed)
+    assert text == "hi" * 10
+
+
+def test_a_streamed_window_of_one_returns_the_final_position(client, api_key, stub_backend, db):
+    chunks = [_chunk() for _ in range(3)]
+    chunks[-1]["choices"][0]["logprobs"]["content"][0]["token"] = "LAST"
+    parsed = _stream_logprobs(client, api_key, stub_backend, chunks, logprobs_last_n=1)
+    content = parsed[-1]["choices"][0]["logprobs"]["content"]
+    assert [e["token"] for e in content] == ["LAST"]
+
+
+def test_a_streamed_window_can_be_compact(client, api_key, stub_backend, db):
+    parsed = _stream_logprobs(client, api_key, stub_backend, [_chunk() for _ in range(5)],
+                              logprobs_last_n=2, logprobs_format="compact")
+    logprobs = parsed[-1]["choices"][0]["logprobs"]
+    assert logprobs["format"] == "compact"
+    assert logprobs["top_logprobs"] == [{"Yes": -0.05, "No": -3.2}] * 2
+
+
+def test_a_streamed_window_is_not_truncated_by_a_cap_the_full_stream_would_hit(
+        client, api_key, stub_backend, db):
+    """The cap is spent on what is sent, and a window sends two positions, not forty."""
+    server_settings.set_config_settings({KEY: 1024})
+    parsed = _stream_logprobs(client, api_key, stub_backend,
+                              [_chunk() for _ in range(40)], logprobs_last_n=2)
+    logprobs = parsed[-1]["choices"][0]["logprobs"]
+    assert len(logprobs["content"]) == 2
+    assert "truncated" not in logprobs
+
+
+def test_a_streamed_window_arrives_before_the_terminator(client, api_key, stub_backend, db):
+    """A client that stops reading at [DONE] must still have seen the logprobs."""
+    stub_backend.chat_completion = AsyncMock(return_value=_sse([_chunk() for _ in range(3)]))
+    r = _post(client, api_key, stream=True, logprobs=True, top_logprobs=2, logprobs_last_n=1)
+    lines = [l for l in r.text.splitlines() if l.startswith("data: ")]
+    carrying = [i for i, l in enumerate(lines)
+                if l[6:].strip() != "[DONE]" and json.loads(l[6:])["choices"][0].get("logprobs")]
+    done = next(i for i, l in enumerate(lines) if l[6:].strip() == "[DONE]")
+    assert carrying and max(carrying) < done
+
+
+def _text_response(n_positions=1):
+    from unillm.types import CompletionResponse, TextChoice, Usage
+    return CompletionResponse(
+        id="x", model="m", usage=Usage(prompt_tokens=1, completion_tokens=1),
+        choices=[TextChoice(index=0, text="hi", finish_reason="stop", logprobs={
+            "tokens": [f"tok{i}" for i in range(n_positions)],
+            "token_logprobs": [-0.1 * i for i in range(n_positions)],
+            "top_logprobs": [{f"tok{i}": -0.1 * i} for i in range(n_positions)],
+            "text_offset": list(range(n_positions)),
+        })],
+    )
+
+
+def _post_text(client, api_key, **body):
+    return client.post("/v1/completions",
+                       json={"model": "lp-on", "prompt": "hi", **body},
+                       headers={"Authorization": f"Bearer {api_key}"})
+
+
+def test_the_legacy_endpoint_returns_only_the_last_n_positions(client, api_key, stub_backend, db):
+    stub_backend.text_completion = AsyncMock(return_value=_text_response(n_positions=50))
+    r = _post_text(client, api_key, logprobs=2, logprobs_last_n=3)
+    assert r.status_code == 200
+    logprobs = r.json()["choices"][0]["logprobs"]
+    assert logprobs["tokens"] == ["tok47", "tok48", "tok49"]
+    assert logprobs["text_offset"] == [47, 48, 49]
+    assert len(logprobs["token_logprobs"]) == 3
+
+
+def test_the_legacy_endpoint_windows_without_any_alternatives(client, api_key, stub_backend, db):
+    """`logprobs: 0` plus a window of 1 is the smallest useful logprobs request there is."""
+    stub_backend.text_completion = AsyncMock(return_value=_text_response(n_positions=50))
+    r = _post_text(client, api_key, logprobs=0, logprobs_last_n=1)
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["logprobs"]["tokens"] == ["tok49"]

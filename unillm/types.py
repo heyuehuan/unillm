@@ -43,6 +43,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs: Optional[bool] = Field(None, description="Return log probabilities of the output tokens. Only served by models configured with supports_logprobs")
     top_logprobs: Optional[int] = Field(None, description="Number of most likely tokens to return at each position, each with a log probability. Requires logprobs=true", ge=0, le=20)
     logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Thins top_logprobs at confident positions; the chosen token's own logprob is always kept. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
+    logprobs_last_n: Optional[int] = Field(None, description="Return logprobs for only the final N generated positions instead of every position. Use 1 for the last token alone. Requires logprobs=true. UniLLM-only, applied to the response rather than forwarded", ge=1)
     logprobs_format: Optional[Literal["openai", "compact"]] = Field(None, description="Wire format for returned logprobs. 'openai' (default) is the standard array-of-objects shape; 'compact' returns parallel arrays with alternatives as a {token: logprob} map, about a third of the bytes, at the cost of the per-token 'bytes' field. UniLLM-only")
     user: Optional[str] = Field(None, description="Unique user identifier")
     labels: Optional[Dict[str, str]] = Field(None, description="Optional labels for request logging (UniLLM-only, not forwarded to backends)")
@@ -75,6 +76,11 @@ class ChatCompletionRequest(BaseModel):
                 "'logprobs_format' describes how logprobs are returned, "
                 "so it requires 'logprobs' to be true"
             )
+        if self.logprobs_last_n is not None and not self.logprobs:
+            raise ValueError(
+                "'logprobs_last_n' selects which logprob positions are returned, "
+                "so it requires 'logprobs' to be true"
+            )
         return self
 
     model_config = {
@@ -105,6 +111,7 @@ class CompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
     logprobs: Optional[int] = Field(None, description="Include log probabilities on the N most likely tokens. Legacy completions use an int here, not a bool", ge=0, le=20)
     logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Requires a non-zero logprobs. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
+    logprobs_last_n: Optional[int] = Field(None, description="Return logprobs for only the final N generated positions instead of every position. Use 1 for the last token alone. Requires a non-zero logprobs. UniLLM-only, applied to the response rather than forwarded", ge=1)
     logprobs_format: Optional[Literal["openai", "compact"]] = Field(None, description="Accepted for symmetry with /v1/chat/completions. Legacy completions already return the flat {token: logprob} shape, so this has no effect here. UniLLM-only")
     user: Optional[str] = Field(None, description="Unique user identifier")
 
@@ -115,6 +122,14 @@ class CompletionRequest(BaseModel):
             raise ValueError(
                 "'logprobs_min_p' filters the alternatives returned by 'logprobs', "
                 "so it requires a non-zero 'logprobs'"
+            )
+        # `is None`, not falsiness: `logprobs: 0` is a real request here for the chosen
+        # tokens' own logprobs with no alternatives, and narrowing that to the last N
+        # positions is exactly the cheapest useful thing this endpoint can do.
+        if self.logprobs_last_n is not None and self.logprobs is None:
+            raise ValueError(
+                "'logprobs_last_n' selects which logprob positions are returned, "
+                "so it requires 'logprobs'"
             )
         return self
 

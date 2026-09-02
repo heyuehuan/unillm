@@ -198,6 +198,41 @@ It is opt-in and defaults to `"openai"`, so existing clients see byte-identical 
 works streamed and not, and combines with `logprobs_min_p`. On `/v1/completions` it is accepted
 but has no effect: that endpoint already returns the flat shape.
 
+#### Returning only the tail with `logprobs_last_n`
+
+Most logprobs requests care about one position, not all of them: the classification token,
+the final word, the yes or no. `logprobs_last_n` returns logprobs for only the final N
+generated positions and drops the rest:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-..." \
+  -d '{"model": "gemini-2.5-flash-lite", "messages": [{"role":"user","content":"Yes or no?"}],
+       "logprobs": true, "top_logprobs": 20, "logprobs_last_n": 1}'
+```
+
+That request returns one position instead of every position the model produced. Combined with
+`logprobs_format: "compact"` it is a few hundred bytes where the default shape would be tens of
+kilobytes.
+
+No provider offers this. OpenAI, Gemini, vLLM, TGI, llama.cpp and Together all take a top-k
+count and apply it to every position; the nearest thing anywhere is Fireworks' `echo_last`,
+which trims the *prompt* suffix rather than the generation. So this is a UniLLM-only parameter
+applied to the response, like `logprobs_min_p` and `logprobs_format` — the model still generates
+every token and the backend still returns every logprob. What changes is how much crosses the
+wire to you, not what you pay for inference. Use `max_tokens` to bound the generation itself.
+
+It works on both endpoints and requires `logprobs` (on `/v1/completions`, `logprobs: 0` counts —
+that plus `logprobs_last_n: 1` is the smallest useful logprobs request there is). It composes
+with `logprobs_min_p` and `logprobs_format`, and it makes a request estimable for the size cap
+below even without `max_tokens`, because however long the generation runs only N positions come
+back.
+
+**Streaming defers the logprobs to one chunk at the end.** Which positions are the last N is not
+knowable until the stream finishes, so they cannot be sent as they arrive. Content deltas still
+stream live and unchanged; the logprobs arrive in a final chunk with an empty delta, emitted just
+before `data: [DONE]`.
+
 #### Capping the total size with `logprobs_max_bytes`
 
 Logprobs are the one part of a response whose size the caller controls and the model does not.
@@ -219,9 +254,10 @@ the effective value from `GET /api/config`.
 
 The cap is enforced twice:
 
-- **Before inference**, when the request is provably too big. A request with `max_tokens` set
-  whose *smallest possible* logprobs payload already exceeds the cap is rejected with **413**
-  and a message naming the limit. The check uses a lower bound, not an average, so it never
+- **Before inference**, when the request is provably too big. A request whose *smallest
+  possible* logprobs payload already exceeds the cap is rejected with **413** and a message
+  naming the limit. This needs a bound on the number of positions, which either `max_tokens`
+  or `logprobs_last_n` supplies. The check uses a lower bound, not an average, so it never
   refuses a request that would have fit.
 - **After generation**, exactly. Anything still over budget is truncated to a prefix and marked
   with `"truncated": true` and `"truncated_at": <positions returned>`. Truncation is never

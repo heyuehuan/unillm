@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional
 
 from unillm.types import ChoiceLogprobs
 
@@ -226,6 +227,175 @@ def compact_stream_chunk(chunk: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Tail selection (logprobs_last_n)
+# ---------------------------------------------------------------------------
+#
+# Callers who only want to know how confident the model was about the *end* of its
+# answer - the classification token, the final word, the yes/no - still have to receive
+# a logprob for every position the model produced. At `top_logprobs: 20` that is tens of
+# kilobytes to read one number.
+#
+# No upstream API can express this. OpenAI, Gemini, vLLM, TGI, llama.cpp and Together
+# all take a per-position top-k count and apply it to every position; the only related
+# knob anywhere is Fireworks' `echo_last`, and that trims the *prompt* suffix, not the
+# generation. So this is a response-side slice, like `logprobs_min_p` and
+# `logprobs_format`: the tokens are generated and returned either way, and what changes
+# is how many of them cross the wire.
+
+
+def _tail(seq: Optional[List[Any]], last_n: int) -> Optional[List[Any]]:
+    """The final `last_n` elements, or the list unchanged if it is already shorter."""
+    if seq is None:
+        return None
+    return seq[-last_n:] if last_n < len(seq) else seq
+
+
+def last_n_choice_logprobs(
+    logprobs: Optional[ChoiceLogprobs], last_n: Optional[int]
+) -> Optional[ChoiceLogprobs]:
+    """
+    Keep only the final `last_n` positions of a parsed chat-shaped ChoiceLogprobs.
+
+    Applied before the compact conversion and before the size budget, so both of those
+    see the window that actually goes out rather than the full sequence.
+    """
+    if logprobs is None or not last_n or last_n <= 0:
+        return logprobs
+    if logprobs.content is not None:
+        logprobs.content = _tail(logprobs.content, last_n)
+    elif logprobs.tokens is not None:
+        logprobs.tokens = _tail(logprobs.tokens, last_n)
+        logprobs.token_logprobs = _tail(logprobs.token_logprobs, last_n)
+        logprobs.top_logprobs = _tail(logprobs.top_logprobs, last_n)
+    return logprobs
+
+
+def last_n_logprobs_payload(
+    logprobs: Optional[Dict[str, Any]], last_n: Optional[int]
+) -> Optional[Dict[str, Any]]:
+    """
+    Same slice for a dict-shaped logprobs object: chat, compact, or legacy flat.
+
+    `text_offset` is sliced alongside the tokens it indexes. Its values are absolute
+    offsets into the completion text, so they stay meaningful after the head is dropped
+    and a caller can still locate the window in the returned string.
+    """
+    if not logprobs or not last_n or last_n <= 0:
+        return logprobs
+    if logprobs.get("content") is not None:
+        logprobs["content"] = _tail(logprobs["content"], last_n)
+        return logprobs
+    if logprobs.get("tokens") is not None:
+        for key in ("tokens", "token_logprobs", "top_logprobs", "text_offset"):
+            if logprobs.get(key) is not None:
+                logprobs[key] = _tail(logprobs[key], last_n)
+    return logprobs
+
+
+class LastNWindow:
+    """
+    A rolling window over a streamed response's logprobs.
+
+    Streaming makes this harder than the buffered case: which positions are the last N
+    is not knowable until the stream ends, so the logprobs cannot be forwarded as they
+    arrive. They are stripped from each chunk, kept in a per-choice window of at most N
+    entries, and emitted once at the end in a final chunk.
+
+    Only the logprobs are deferred. Content deltas still stream live, so the caller sees
+    text at the same latency as any other request and simply receives the logprobs with
+    the last chunk instead of spread across all of them.
+    """
+
+    def __init__(self, last_n: int):
+        self.last_n = last_n
+        # Per choice index, because `n: 4` streams four interleaved choices.
+        self._chat: Dict[int, Deque[Dict[str, Any]]] = {}
+        self._flat: Dict[int, Deque[tuple]] = {}
+        self._flat_has_offset: Dict[int, bool] = {}
+        # The identity fields of the last chunk seen, reused so the emitted chunk is
+        # recognisably part of the same response rather than a synthetic object.
+        self._template: Dict[str, Any] = {}
+
+    def _window(self, store: Dict[int, Deque], index: int) -> Deque:
+        if index not in store:
+            store[index] = deque(maxlen=self.last_n)
+        return store[index]
+
+    def capture(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
+        """Buffer this chunk's logprob positions and remove them from the chunk."""
+        for key in ("id", "object", "created", "model"):
+            if key in chunk:
+                self._template[key] = chunk[key]
+        for choice in chunk.get("choices") or []:
+            logprobs = choice.get("logprobs")
+            if not isinstance(logprobs, dict):
+                continue
+            index = choice.get("index", 0)
+            content = logprobs.get("content")
+            if content is not None:
+                self._window(self._chat, index).extend(content)
+            elif logprobs.get("tokens") is not None:
+                tokens = logprobs.get("tokens") or []
+                token_logprobs = logprobs.get("token_logprobs") or []
+                per_position = logprobs.get("top_logprobs") or []
+                offsets = logprobs.get("text_offset")
+                if offsets is not None:
+                    self._flat_has_offset[index] = True
+                window = self._window(self._flat, index)
+                for i, token in enumerate(tokens):
+                    window.append((
+                        token,
+                        token_logprobs[i] if i < len(token_logprobs) else 0.0,
+                        per_position[i] if i < len(per_position) else {},
+                        offsets[i] if offsets is not None and i < len(offsets) else None,
+                    ))
+            # Nulled rather than deleted: a `logprobs` key that disappears mid-stream
+            # and reappears at the end reads as a malformed response to a client that
+            # checks for its presence.
+            choice["logprobs"] = None
+        return chunk
+
+    def _payload_for(self, index: int) -> Optional[Dict[str, Any]]:
+        if index in self._chat:
+            return {"content": list(self._chat[index])}
+        if index in self._flat:
+            rows = list(self._flat[index])
+            payload = {
+                "tokens": [r[0] for r in rows],
+                "token_logprobs": [r[1] for r in rows],
+                "top_logprobs": [r[2] for r in rows],
+            }
+            if self._flat_has_offset.get(index):
+                payload["text_offset"] = [r[3] for r in rows]
+            return payload
+        return None
+
+    def flush(self) -> Optional[Dict[str, Any]]:
+        """
+        Build the single trailing chunk carrying the buffered windows.
+
+        Returns None when nothing was buffered, which is the normal case for a model
+        that served no logprobs at all - there is nothing to say, so no chunk is added.
+        """
+        indexes = sorted(set(self._chat) | set(self._flat))
+        if not indexes:
+            return None
+        is_text = self._template.get("object") == "text_completion"
+        choices = []
+        for index in indexes:
+            choice: Dict[str, Any] = {"index": index, "finish_reason": None,
+                                      "logprobs": self._payload_for(index)}
+            # An empty delta/text keeps the chunk a valid member of its stream, so a
+            # client accumulating the response concatenates nothing extra.
+            if is_text:
+                choice["text"] = ""
+            else:
+                choice["delta"] = {}
+            choices.append(choice)
+        return {**self._template, "choices": choices}
+
+
+# ---------------------------------------------------------------------------
 # Size budget
 # ---------------------------------------------------------------------------
 
@@ -249,19 +419,34 @@ _MIN_BYTES_PER_ALTERNATIVE = {
 }
 
 
-def min_bytes_estimate(max_tokens: Optional[int], top_logprobs: Optional[int], response_format: str) -> Optional[int]:
+def bounded_positions(max_tokens: Optional[int], last_n: Optional[int]) -> Optional[int]:
+    """
+    The most logprob positions this request can return, or None if it is unbounded.
+
+    `max_tokens` bounds how many the model may generate; `logprobs_last_n` bounds how
+    many of those are returned. Either one alone is a bound, and when both are set the
+    smaller wins. This is why `logprobs_last_n` makes a request estimable even without
+    `max_tokens`: however long the generation runs, only N positions come back.
+    """
+    candidates = [v for v in (max_tokens, last_n) if v and v > 0]
+    return min(candidates) if candidates else None
+
+
+def min_bytes_estimate(max_tokens: Optional[int], top_logprobs: Optional[int],
+                       response_format: str, last_n: Optional[int] = None) -> Optional[int]:
     """
     A floor on how many bytes the logprobs for this request could occupy.
 
-    Returns None when `max_tokens` is unset, because then there is no bound on how
-    many positions the model will produce and no honest estimate to make. Those
-    requests are caught after the fact by truncation instead.
+    Returns None when nothing bounds the number of positions, because then there is no
+    honest estimate to make. Those requests are caught after the fact by truncation
+    instead.
     """
-    if not max_tokens or max_tokens <= 0:
+    positions = bounded_positions(max_tokens, last_n)
+    if positions is None:
         return None
     fmt = response_format if response_format in _MIN_BYTES_PER_POSITION else OPENAI_FORMAT
     per_alt = _MIN_BYTES_PER_ALTERNATIVE[fmt] * max(top_logprobs or 0, 0)
-    return max_tokens * (_MIN_BYTES_PER_POSITION[fmt] + per_alt)
+    return positions * (_MIN_BYTES_PER_POSITION[fmt] + per_alt)
 
 
 def _encoded_size(value: Any) -> int:

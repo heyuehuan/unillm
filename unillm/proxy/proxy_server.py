@@ -10,7 +10,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import httpx
 import yaml
@@ -58,6 +58,9 @@ from unillm.llm.logprobs import (
     compact_stream_chunk,
     filter_choice_logprobs,
     filter_legacy_logprobs,
+    last_n_choice_logprobs,
+    last_n_logprobs_payload,
+    LastNWindow,
     filter_stream_chunk,
     min_bytes_estimate,
     min_logprob_for,
@@ -522,6 +525,7 @@ async def _stream_with_logging(
     min_logprob: Optional[float] = None,
     compact_logprobs: bool = False,
     budget: Optional[LogprobsBudget] = None,
+    last_n: Optional[int] = None,
 ):
     """
     Wrap an SSE stream: rewrite the model alias, capture the final usage numbers, and
@@ -529,34 +533,68 @@ async def _stream_with_logging(
     makes streaming requests metered — previously they were logged as 200/0-tokens up front.
 
     `min_logprob` thins each chunk's logprob alternatives, `compact_logprobs` rewrites
-    them into the flat {token: logprob} shape, and `budget` stops emitting them once the
-    request's size cap is spent. All three ride along here because every chunk is already
-    parsed and re-serialized to rewrite the alias, so they cost no extra pass; with none
-    of them set the chunks come out exactly as before.
+    them into the flat {token: logprob} shape, `budget` stops emitting them once the
+    request's size cap is spent, and `last_n` keeps only the final N positions. All four
+    ride along here because every chunk is already parsed and re-serialized to rewrite
+    the alias, so they cost no extra pass; with none of them set the chunks come out
+    exactly as before.
 
     The budget is shared across chunks on purpose: the cap is on the whole response, so
     each chunk spends from what earlier chunks left.
+
+    `last_n` changes the timing rather than just the content. Which positions are the
+    last N is unknowable until the stream ends, so logprobs are stripped from every
+    chunk on the way past, held in a rolling window, and emitted in one extra chunk at
+    the end. The other three transforms then run once, on that final window, so they
+    measure and shape what actually goes out. Content deltas are untouched and still
+    stream live.
     """
     prompt_tokens = 0
     completion_tokens = 0
     status_code = 200
     error_message: Optional[str] = None
+    window = LastNWindow(last_n) if last_n else None
+    flushed = False
+
+    def _final_chunk() -> Optional[str]:
+        """The trailing logprobs chunk, shaped by the same transforms as a whole response."""
+        chunk = window.flush() if window is not None else None
+        if chunk is None:
+            return None
+        if min_logprob is not None:
+            filter_stream_chunk(chunk, min_logprob)
+        if compact_logprobs:
+            compact_stream_chunk(chunk)
+        if budget is not None:
+            budget.apply_to_stream_chunk(chunk)
+        return f"data: {json.dumps(chunk)}\n\n"
+
     try:
         async for chunk in stream:
             if chunk.startswith("data: "):
                 data = chunk[6:].strip()
                 if data == "[DONE]":
+                    # The window has to go out before the terminator, or a client that
+                    # stops reading at [DONE] never sees the logprobs it asked for.
+                    if window is not None and not flushed:
+                        flushed = True
+                        final = _final_chunk()
+                        if final is not None:
+                            yield final
                     yield chunk
                     continue
                 try:
                     parsed = json.loads(data)
                     parsed["model"] = model_alias
-                    if min_logprob is not None:
-                        filter_stream_chunk(parsed, min_logprob)
-                    if compact_logprobs:
-                        compact_stream_chunk(parsed)
-                    if budget is not None:
-                        budget.apply_to_stream_chunk(parsed)
+                    if window is not None:
+                        window.capture(parsed)
+                    else:
+                        if min_logprob is not None:
+                            filter_stream_chunk(parsed, min_logprob)
+                        if compact_logprobs:
+                            compact_stream_chunk(parsed)
+                        if budget is not None:
+                            budget.apply_to_stream_chunk(parsed)
                     usage = parsed.get("usage")
                     if usage:
                         prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
@@ -566,6 +604,13 @@ async def _stream_with_logging(
                     yield chunk
             else:
                 yield chunk
+        # Not every backend terminates with [DONE]; without this the window would be
+        # collected silently and the caller would get a 200 with no logprobs at all.
+        if window is not None and not flushed:
+            flushed = True
+            final = _final_chunk()
+            if final is not None:
+                yield final
     except Exception as e:
         status_code = _upstream_status(e)
         error_message = str(e)
@@ -583,14 +628,39 @@ async def _stream_with_logging(
 
 
 
+def _returns_logprobs(request_body) -> bool:
+    """
+    Whether this request will actually produce logprobs.
+
+    The two endpoints spell the switch differently. Chat takes a bool, so only `true`
+    counts. Legacy completions take a count that doubles as the switch, where `0` is a
+    real request for the chosen tokens' own logprobs with no alternatives — so there
+    anything non-None counts. `bool` is checked first because it is a subclass of `int`
+    and `False == 0`.
+    """
+    value = getattr(request_body, "logprobs", None)
+    if isinstance(value, bool):
+        return value
+    return value is not None
+
+
+class _LogprobsPlan(NamedTuple):
+    """Everything the proxy decided about this request's logprobs, resolved once."""
+    min_logprob: Optional[float]
+    response_format: str
+    last_n: Optional[int]
+    budget: LogprobsBudget
+    rejection: Optional[str]
+
+
 def _logprobs_response_plan(request_body, max_tokens: Optional[int], top_logprobs: Optional[int],
-                            wire_format: Optional[str] = None):
+                            wire_format: Optional[str] = None) -> "_LogprobsPlan":
     """
     Work out how this request's logprobs will be shaped and sized before calling out.
 
-    Returns (min_logprob, response_format, budget, rejection). `rejection` is a message
-    when the request cannot possibly fit under the server's size cap, so the caller can
-    fail it before paying for inference; it is None otherwise.
+    `rejection` is a message when the request cannot possibly fit under the server's
+    size cap, so the caller can fail it before paying for inference; it is None
+    otherwise.
 
     `wire_format` overrides what the size estimate assumes. The legacy /v1/completions
     endpoint always returns the flat shape, whatever the caller asks for, so estimating
@@ -603,20 +673,21 @@ def _logprobs_response_plan(request_body, max_tokens: Optional[int], top_logprob
     """
     min_logprob = min_logprob_for(getattr(request_body, "logprobs_min_p", None))
     response_format = wire_format or getattr(request_body, "logprobs_format", None) or OPENAI_FORMAT
-    if not request_body.logprobs:
-        return min_logprob, response_format, LogprobsBudget(None), None
+    last_n = getattr(request_body, "logprobs_last_n", None)
+    if not _returns_logprobs(request_body):
+        return _LogprobsPlan(min_logprob, response_format, None, LogprobsBudget(None), None)
 
     max_bytes = server_settings.get_setting_cached(server_settings.LOGPROBS_MAX_BYTES)
-    floor = min_bytes_estimate(max_tokens, top_logprobs, response_format)
+    floor = min_bytes_estimate(max_tokens, top_logprobs, response_format, last_n=last_n)
     rejection = None
     if floor is not None and floor > max_bytes:
         rejection = (
             f"This request would return at least {floor} bytes of logprobs, over the "
             f"server limit of {max_bytes} bytes per request. Lower 'max_tokens' or "
-            f"'top_logprobs', or use 'logprobs_format': 'compact', which is about a "
-            f"third the size."
+            f"'top_logprobs', set 'logprobs_last_n' to return only the final positions, "
+            f"or use 'logprobs_format': 'compact', which is about a third the size."
         )
-    return min_logprob, response_format, LogprobsBudget(max_bytes), rejection
+    return _LogprobsPlan(min_logprob, response_format, last_n, LogprobsBudget(max_bytes), rejection)
 
 
 # Chat completions endpoint
@@ -695,12 +766,11 @@ async def chat_completions(
     # Resolved once per request: the floor, the wire format and the size cap are all
     # response-side concerns the proxy applies itself, so none of them reach the backend
     # and none belong in handler_kwargs.
-    min_logprob, logprobs_format, logprobs_budget, rejection = _logprobs_response_plan(
-        request_body, max_tokens, request_body.top_logprobs
-    )
-    if rejection:
-        _log(status_code=413, error_message=rejection)
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=rejection)
+    plan = _logprobs_response_plan(request_body, max_tokens, request_body.top_logprobs)
+    if plan.rejection:
+        _log(status_code=413, error_message=plan.rejection)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=plan.rejection)
 
     try:
         handler_kwargs = {
@@ -730,20 +800,24 @@ async def chat_completions(
             response = await _prime_stream(response)
             return StreamingResponse(
                 _stream_with_logging(
-                    response, model, log_fields, start_time, min_logprob,
-                    compact_logprobs=logprobs_format == COMPACT_FORMAT,
-                    budget=logprobs_budget,
+                    response, model, log_fields, start_time, plan.min_logprob,
+                    compact_logprobs=plan.response_format == COMPACT_FORMAT,
+                    budget=plan.budget,
+                    last_n=plan.last_n,
                 ),
                 media_type="text/event-stream",
             )
 
-        # Order matters: thin first so the compact form and the byte count both reflect
-        # what actually goes out, and charge the budget last against the final shape.
+        # Order matters. Slice to the requested window first so nothing downstream pays
+        # for positions that will not be sent; thin next so the compact form and the
+        # byte count both reflect what actually goes out; charge the budget last,
+        # against the final shape.
         for choice in response.choices:
-            logprobs = filter_choice_logprobs(choice.logprobs, min_logprob)
-            if logprobs_format == COMPACT_FORMAT:
+            logprobs = last_n_choice_logprobs(choice.logprobs, plan.last_n)
+            logprobs = filter_choice_logprobs(logprobs, plan.min_logprob)
+            if plan.response_format == COMPACT_FORMAT:
                 logprobs = compact_choice_logprobs(logprobs)
-            choice.logprobs = logprobs_budget.apply_to_choice(logprobs)
+            choice.logprobs = plan.budget.apply_to_choice(logprobs)
 
         response.model = model
         usage = response.usage
@@ -833,12 +907,12 @@ async def completions(
         )
 
     # `logprobs` is a count here, not a bool, and doubles as the per-position width.
-    min_logprob, _, logprobs_budget, rejection = _logprobs_response_plan(
-        request_body, max_tokens, request_body.logprobs, wire_format=COMPACT_FORMAT
-    )
-    if rejection:
-        _log(status_code=413, error_message=rejection)
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=rejection)
+    plan = _logprobs_response_plan(request_body, max_tokens, request_body.logprobs,
+                                   wire_format=COMPACT_FORMAT)
+    if plan.rejection:
+        _log(status_code=413, error_message=plan.rejection)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=plan.rejection)
 
     try:
         handler_kwargs = {
@@ -868,15 +942,17 @@ async def completions(
             response = await _prime_stream(response)
             return StreamingResponse(
                 _stream_with_logging(
-                    response, model, log_fields, start_time, min_logprob,
-                    budget=logprobs_budget,
+                    response, model, log_fields, start_time, plan.min_logprob,
+                    budget=plan.budget,
+                    last_n=plan.last_n,
                 ),
                 media_type="text/event-stream",
             )
 
         for choice in response.choices:
-            logprobs = filter_legacy_logprobs(choice.logprobs, min_logprob)
-            choice.logprobs = logprobs_budget.apply_to_payload(logprobs)
+            logprobs = last_n_logprobs_payload(choice.logprobs, plan.last_n)
+            logprobs = filter_legacy_logprobs(logprobs, plan.min_logprob)
+            choice.logprobs = plan.budget.apply_to_payload(logprobs)
 
         response.model = model
         usage = response.usage

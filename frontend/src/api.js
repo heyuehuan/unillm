@@ -112,6 +112,9 @@ export const api = {
 
   getModels: () => req('GET', '/api/models'),
 
+  // The docs wiki: every page, markdown and metadata, in one response.
+  getDocs: () => req('GET', '/api/documentation'),
+
   getStats: (params, opts) => req('GET', `/api/logs/stats${qs(params)}`, undefined, opts),
   getRequests: (params, opts) => req('GET', `/api/logs/requests${qs(params)}`, undefined, opts),
   getAudit: (params, opts) => req('GET', `/api/logs/audit${qs(params)}`, undefined, opts),

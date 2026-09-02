@@ -43,6 +43,11 @@ def set_general_settings(settings: Dict):
     _general_settings = settings
 
 
+def get_general_settings() -> Dict:
+    """The `general_settings` block the server was started with."""
+    return _general_settings
+
+
 def _is_dev_mode_allowed(db: Optional[Session] = None) -> bool:
     """
     Dev mode (allow-all when no keys configured) requires UNILLM_DEV_MODE=true

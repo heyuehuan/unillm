@@ -20,6 +20,7 @@ from unillm.config import get_jwt_secret, recoverable_keys_allowed
 from unillm.db import get_db
 from unillm.db import crud
 from unillm.db.models import APIKey, Project, User
+from unillm.proxy import docs_pages
 from unillm.proxy import forwarded
 from unillm.proxy import ratelimit
 from unillm.proxy import server_settings
@@ -469,6 +470,32 @@ def get_server_config(_: User = Depends(get_current_user), db: Session = Depends
         logprobs_max_bytes=server_settings.get_setting(db, server_settings.LOGPROBS_MAX_BYTES),
     )
 
+
+# ---------------------------------------------------------------------------
+# Documentation wiki
+# ---------------------------------------------------------------------------
+
+class DocPageResponse(BaseModel):
+    slug: str
+    title: str
+    group: str
+    keywords: List[str]
+    body: str
+
+
+@router.get("/documentation", response_model=List[DocPageResponse])
+def get_documentation(_: User = Depends(get_current_user)):
+    """
+    Serve the markdown wiki under `unillm/documentation`.
+
+    Every page comes back in one response rather than one call per page. The whole
+    wiki is a few tens of kilobytes, and having it client-side is what makes the
+    search box and page switching instant.
+
+    Bodies are rendered against this deployment's settings on the way out, so a page
+    can state what this server does instead of listing what a server might do.
+    """
+    return docs_pages.load_pages(docs_pages.context())
 
 # ---------------------------------------------------------------------------
 # Users

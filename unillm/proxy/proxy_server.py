@@ -21,7 +21,7 @@ from fastapi.openapi.docs import (
     get_swagger_ui_html,
     get_swagger_ui_oauth2_redirect_html,
 )
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from unillm import __version__
 from unillm._logging import verbose_proxy_logger, set_verbose
@@ -346,8 +346,17 @@ if os.path.isdir(_STATIC_DIR):
 async def root():
     if os.path.isfile(_STATIC_INDEX):
         return FileResponse(_STATIC_INDEX)
-    from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/docs")
+
+
+# The console routes on the hash, so a plain /documentation URL would load the app
+# with no route and land on the dashboard. Redirect instead, which keeps
+# /documentation and /documentation/<page> as shareable links.
+@app.get("/documentation", include_in_schema=False)
+@app.get("/documentation/{page:path}", include_in_schema=False)
+async def documentation(page: str = ""):
+    suffix = f"/{page.strip('/')}" if page.strip("/") else ""
+    return RedirectResponse(url=f"/#/documentation{suffix}")
 
 
 # Model endpoints

@@ -1,5 +1,5 @@
 import { navigate } from '../router.js'
-import { IcLayout, IcFolder, IcKey, IcLog, IcShield, IcSettings, IcSun, IcMoon, IcChart, IcZap, IcLogOut } from './Icons.jsx'
+import { IcLayout, IcFolder, IcKey, IcLog, IcShield, IcSettings, IcSun, IcMoon, IcChart, IcZap, IcLogOut, IcBook } from './Icons.jsx'
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', Icon: IcLayout },
@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { id: 'usage', label: 'Usage', Icon: IcChart },
 ]
 const ORG_ITEMS = [
+  { id: 'documentation', label: 'Documentation', Icon: IcBook },
   { id: 'admin', label: 'Admin', Icon: IcShield, adminOnly: true },
   { id: 'sshkeys', label: 'My SSH Keys', Icon: IcKey },
   { id: 'settings', label: 'Settings', Icon: IcSettings },
@@ -58,7 +59,8 @@ export function Sidebar({ route, user, onLogout }) {
 export function Topbar({ route, displayTheme, onToggleTheme }) {
   const labels = {
     dashboard: 'Dashboard', projects: 'Projects',
-    models: 'Models', logs: 'Logs', usage: 'Usage', admin: 'Admin', sshkeys: 'My SSH Keys', settings: 'Settings',
+    models: 'Models', logs: 'Logs', usage: 'Usage', admin: 'Admin', sshkeys: 'My SSH Keys',
+    documentation: 'Documentation', settings: 'Settings',
   }
   const themeLabel = displayTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'
   return (

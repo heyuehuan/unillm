@@ -68,6 +68,11 @@ export default function Logs({ user, filters, setFilters, scope, setScope, selec
     api.getProjects().then(setProjects).catch(() => {})
   }, [])
 
+  // The URL owns the selection. Arriving from a "view this request" link while
+  // already on this page only changes the query string, and the initial useState
+  // value is read once — so without this the page kept showing the old request.
+  useEffect(() => { setSelectedId(selectId) }, [selectId])
+
   // Debounce the free-text model filter so typing doesn't fire a request per key.
   const [debouncedModel, setDebouncedModel] = useState('')
   useEffect(() => {

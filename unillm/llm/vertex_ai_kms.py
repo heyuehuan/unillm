@@ -156,6 +156,18 @@ class VertexAIKMSHandler:
         self._models: Dict[tuple, GenerativeModel] = {}
         self._models_cache_max = 128
 
+    def invalidate_credentials(self) -> None:
+        """
+        Drop every cached GenerativeModel so the next call rebuilds against new ADC.
+
+        There is no credentials object to clear here: each cached model owns a
+        prediction client that captured credentials when it was warmed. Replacing
+        the ADC file underneath leaves those clients holding the old token, so the
+        cache — not a credential — is what has to go.
+        """
+        with _global_vertexai_lock:
+            self._models.clear()
+
     def _get_model(self, model_name: str, project: Optional[str], location: str,
                    kms_key_name: Optional[str],
                    system_instruction: Optional[str] = None) -> GenerativeModel:

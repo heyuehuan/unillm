@@ -88,6 +88,18 @@ class VertexAIHandler:
 
         return self._credentials, self._adc_project
     
+    def invalidate_credentials(self) -> None:
+        """
+        Forget the cached credentials so the next call re-reads ADC from disk.
+
+        google.auth.default() is consulted once and the result kept for the life of
+        the process. That is right for a token that refreshes itself, and wrong the
+        moment the underlying ADC file is replaced — a re-login writes a new refresh
+        token, and this handler would keep presenting the dead one until restarted.
+        """
+        self._credentials = None
+        self._adc_project = None
+
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create async HTTP client"""
         if self._http_client is None or self._http_client.is_closed:

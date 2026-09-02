@@ -18,6 +18,7 @@ def _reset_rate_limiters():
 
     for limiter in (ratelimit.login_attempt_limiter, ratelimit.login_ip_limiter,
                     ratelimit.login_user_limiter, ratelimit.docs_limiter,
-                    ratelimit.login_audit_limiter, ratelimit.profile_email_limiter):
+                    ratelimit.login_audit_limiter, ratelimit.profile_email_limiter,
+                    ratelimit.adk_action_limiter):
         limiter.clear()
     yield

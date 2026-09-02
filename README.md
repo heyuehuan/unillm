@@ -17,6 +17,7 @@ Point the OpenAI SDK at UniLLM, and it handles authentication, per-project API k
 - API keys stored as SHA-256 hashes. By default the server also keeps an encrypted-at-rest copy so a project's developers and admins can reveal a key again later (audited); set `UNILLM_RECOVERABLE_KEYS=false` and no copy is kept, making every key show-once
 - JWT-based management API (`/api/*`) and React web console
 - Optional SSH-signature attribution: requests signed with a user's SSH key are attributed to that user in logs
+- Google Cloud credential renewal from the console: the `gcloud` login behind Vertex AI expires roughly daily, and any user or admin can test the credentials and re-authenticate from a browser instead of needing a shell on the proxy host (opt-in, `general_settings.gcp_adk`)
 
 **Observability & governance**
 - Per-request logs: tokens, latency, status, cost, model, client IP, key prefix, SSH user, custom labels
@@ -55,6 +56,10 @@ pip install -e .
 ```bash
 gcloud auth application-default login
 ```
+
+Google expires these credentials roughly daily. Turning on `gcp_adk` in the config adds a
+**Google Cloud auth** page to the console where any user can test them and run this login
+again from a browser, so renewing them does not need shell access to the proxy host.
 
 ### 2. Create a config file
 

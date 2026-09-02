@@ -112,6 +112,16 @@ export const api = {
 
   getModels: () => req('GET', '/api/models'),
 
+  // Google Cloud ADC: status is readable by anyone signed in; the rest need a
+  // user or admin role and are refused while the credentials look healthy.
+  getGcpAdkStatus: (opts) => req('GET', '/api/gcp-adk-refresh/status', undefined, opts),
+  runGcpAdkHealthTest: () => req('POST', '/api/gcp-adk-refresh/health-test'),
+  startGcpAdkRefresh: (force = false) =>
+    req('POST', `/api/gcp-adk-refresh/start${force ? '?force=true' : ''}`),
+  getGcpAdkSession: (id, opts) => req('GET', `/api/gcp-adk-refresh/session/${id}`, undefined, opts),
+  submitGcpAdkCode: (id, code) => req('POST', `/api/gcp-adk-refresh/session/${id}/code`, { code }),
+  cancelGcpAdkRefresh: (id) => req('POST', `/api/gcp-adk-refresh/session/${id}/cancel`),
+
   // The docs wiki: every page, markdown and metadata, in one response.
   getDocs: () => req('GET', '/api/documentation'),
 

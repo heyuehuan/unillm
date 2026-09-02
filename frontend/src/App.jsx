@@ -14,6 +14,7 @@ import Settings from './pages/Settings.jsx'
 import Models from './pages/Models.jsx'
 import SSHKeys from './pages/SSHKeys.jsx'
 import Documentation from './pages/Documentation.jsx'
+import GcpAuth from './pages/GcpAuth.jsx'
 
 function resolveTheme(pref) {
   if (pref === 'system') {
@@ -147,6 +148,7 @@ export default function App() {
   else if (route === 'admin' && isAdmin) page = <Admin currentUser={user} tab={parts[1] || 'users'} />
   else if (route === 'sshkeys') page = <SSHKeys user={user} />
   else if (route === 'documentation') page = <Documentation section={parts[1] || null} />
+  else if (route === 'gcp-auth') page = <GcpAuth user={user} />
   else if (route === 'settings') page = <Settings user={user} theme={theme} setTheme={setTheme} onUserUpdated={setUser} onLogout={handleLogout} />
   else page = <Dashboard user={user} {...filterProps} />
 

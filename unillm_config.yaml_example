@@ -21,3 +21,25 @@ general_settings:
   # override this at runtime under Admin -> Server Settings; clearing that override
   # falls back to whatever is set here.
   # logprobs_max_bytes: 1048576
+
+  # --- Google Cloud ADC re-authentication -----------------------------------
+  # The credentials behind every Gemini call are a user login that Google expires
+  # roughly daily. With this on, the console offers a "Google Cloud auth" page where
+  # any signed-in user can test the credentials and, when they are dead, run the
+  # gcloud sign-in without shell access to this host.
+  gcp_adk:
+    enabled: false
+    # Impersonated by the re-login, so every operator's browser sign-in ends up
+    # producing credentials for the same identity. Leave blank to write plain user
+    # ADC instead (no --impersonate-service-account).
+    service_account: "unillm-proxy@gcp-project-id.iam.gserviceaccount.com"
+    # The alias the health test calls. Must exist in model_list above; the cheapest
+    # one in the deployment is the right choice, since it runs on demand.
+    health_model: gemini-2.5-flash-lite
+    # A credential failure inside this window with no success inside it is what makes
+    # the console offer a refresh unprompted.
+    stale_after_seconds: 3600
+    # --no-launch-browser makes gcloud print the sign-in URL and wait for the
+    # authorization code, which is the only flow that works when the browser is on a
+    # different machine from the proxy.
+    login_args: ["--no-launch-browser"]

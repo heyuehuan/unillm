@@ -245,6 +245,53 @@ class UpsertModelPricingRequest(BaseModel):
     notes: Optional[str] = Field(None, max_length=_MAX_DESCRIPTION_LEN)
 
 
+class GcpAdkHealthResult(BaseModel):
+    """One real call to the health model, and what it proved."""
+    healthy: bool
+    checked_at: datetime
+    model: str
+    latency_ms: int
+    reply: Optional[str] = None
+    error: Optional[str] = None
+    auth_related: bool = False
+    checked_by: Optional[str] = None
+
+
+class GcpAdkSessionResponse(BaseModel):
+    """A gcloud re-login in progress, as much of it as a browser needs to see."""
+    session_id: str
+    state: str
+    url: Optional[str] = None
+    error: Optional[str] = None
+    output: Optional[str] = None
+    started_at: datetime
+    started_by: Optional[str] = None
+    service_account: Optional[str] = None
+    command: Optional[str] = None
+
+
+class GcpAdkStatusResponse(BaseModel):
+    enabled: bool
+    available: bool
+    service_account: Optional[str] = None
+    health_model: str
+    health_prompt: str
+    window_seconds: int
+    needs_refresh: bool
+    reasons: List[str] = []
+    last_auth_failure_at: Optional[datetime] = None
+    last_auth_failure_message: Optional[str] = None
+    last_success_at: Optional[datetime] = None
+    last_health: Optional[GcpAdkHealthResult] = None
+    active_session: Optional[GcpAdkSessionResponse] = None
+
+
+class SubmitAuthCodeRequest(BaseModel):
+    # gcloud's authorization codes are around 70 characters; the ceiling is only
+    # there so a caller cannot push megabytes down a subprocess's stdin.
+    code: str = Field(..., min_length=4, max_length=4096)
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -1457,3 +1504,213 @@ def get_stats(
         filter_ids = _resolve_project_filter(db, current_user, project_ids)
     return crud.get_request_stats(db, from_date=_naive_utc(from_date), to_date=_naive_utc(to_date),
                                   allowed_project_ids=filter_ids, ssh_username=effective_ssh)
+
+
+# ---------------------------------------------------------------------------
+# Google Cloud ADC re-authentication
+# ---------------------------------------------------------------------------
+#
+# The credentials behind every Gemini call are a user login that Google expires
+# about once a day. Renewing them is `gcloud auth application-default login` on the
+# proxy host, which used to mean the outage lasted until whoever had shell access
+# noticed. These endpoints hand that job to anyone signed in to the console: they
+# report whether the credentials look dead, prove it with one tiny model call, and
+# drive the gcloud sign-in from the browser the operator is already looking at.
+#
+# The gate is deliberate. Starting a session is refused unless something is actually
+# broken, so this is a recovery tool rather than a permanently available way to run
+# gcloud on the server. See unillm.proxy.gcp_adk for the two signals it trusts.
+
+
+def _adk_actor(current_user: User) -> User:
+    """
+    Callers allowed to *do* something here, as opposed to read the status.
+
+    Users and admins qualify. Viewers do not: a viewer's whole role is read-only
+    observation, and spawning a process on the proxy host is neither.
+    """
+    if current_user.global_role not in ("user", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only users and admins can re-authenticate Google Cloud credentials",
+        )
+    return current_user
+
+
+def _adk_throttle(current_user: User) -> None:
+    retry_after = ratelimit.adk_action_limiter.hit(str(current_user.id))
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many Google Cloud auth actions. Try again shortly.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def _adk_config_or_404():
+    from unillm.proxy import gcp_adk
+
+    config = gcp_adk.load_config()
+    if not config.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Google Cloud ADC refresh is not enabled on this deployment",
+        )
+    return config
+
+
+@router.get("/gcp-adk-refresh/status", response_model=GcpAdkStatusResponse)
+def gcp_adk_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Whether the Google credentials look expired, and what says so.
+
+    Readable by anyone signed in — including viewers — because knowing the proxy is
+    down is not a privileged fact, and the page that offers the fix has to render
+    for everyone before it can decide what to show them.
+    """
+    from unillm.proxy import gcp_adk
+
+    return gcp_adk.status(db)
+
+
+@router.post("/gcp-adk-refresh/health-test", response_model=GcpAdkHealthResult)
+async def gcp_adk_health_test(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Ask the cheapest configured Gemini to say hi, and report what happened.
+
+    This is the definitive answer the log signal can only guess at: it runs through
+    the same handler a served request uses, so a pass means the ADC token refreshed
+    and Vertex answered, and a failure carries the reason.
+    """
+    from unillm.proxy import gcp_adk
+
+    _adk_actor(current_user)
+    config = _adk_config_or_404()
+    _adk_throttle(current_user)
+
+    try:
+        result = await gcp_adk.run_health_test(checked_by=current_user.username)
+    except gcp_adk.HealthModelUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+    _audit(db, "gcp_adk_health_test", request, user=current_user,
+           severity="info" if result.healthy else "warning",
+           resource_type="gcp_adk", resource_id=config.health_model,
+           detail={"healthy": result.healthy, "auth_related": result.auth_related,
+                   "latency_ms": result.latency_ms})
+    return result
+
+
+@router.post("/gcp-adk-refresh/start", response_model=GcpAdkSessionResponse)
+async def gcp_adk_start(
+    request: Request,
+    force: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Start `gcloud auth application-default login` and return its sign-in URL.
+
+    Refused with a 409 while the credentials still look healthy. `force` overrides
+    that, and is admin-only: re-running the login on a working deployment replaces
+    a credential that other people's requests are relying on right now.
+    """
+    from unillm.proxy import gcp_adk
+
+    _adk_actor(current_user)
+    config = _adk_config_or_404()
+
+    if force and current_user.global_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only admins can force a refresh")
+
+    if not config.available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"'{config.gcloud_path}' is not available on the proxy host",
+        )
+
+    state = gcp_adk.status(db, config)
+    # An already-running session is joinable whatever the current signal says: the
+    # person who started it may have already fixed the symptom this check reads.
+    running = state.get("active_session")
+    if not running and not force and not state["needs_refresh"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The Google Cloud credentials look healthy. Run the health test first, "
+                   "or ask an admin to force a refresh.",
+        )
+
+    _adk_throttle(current_user)
+    session = await gcp_adk.start_session(config, started_by=current_user.username)
+    _audit(db, "gcp_adk_refresh_started", request, user=current_user, severity="warning",
+           resource_type="gcp_adk", resource_id=session.id,
+           detail={"service_account": config.service_account, "forced": force,
+                   "reasons": state.get("reasons")})
+    return session.as_dict()
+
+
+def _session_or_404(session_id: str):
+    from unillm.proxy import gcp_adk
+
+    session = gcp_adk.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No such sign-in session")
+    return session
+
+
+@router.get("/gcp-adk-refresh/session/{session_id}", response_model=GcpAdkSessionResponse)
+def gcp_adk_session(session_id: str, current_user: User = Depends(get_current_user)):
+    """
+    Poll a sign-in in progress.
+
+    This is also how a sign-in that needed no pasted code is noticed: gcloud simply
+    exits, and the next poll reports `succeeded`.
+    """
+    _adk_config_or_404()
+    return _session_or_404(session_id).as_dict()
+
+
+@router.post("/gcp-adk-refresh/session/{session_id}/code", response_model=GcpAdkSessionResponse)
+async def gcp_adk_submit_code(
+    session_id: str,
+    req: SubmitAuthCodeRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Paste the authorization code Google showed after sign-in."""
+    _adk_actor(current_user)
+    _adk_config_or_404()
+    session = _session_or_404(session_id)
+    try:
+        await session.submit_code(req.code)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    # The code itself is never audited or logged — it is single-use, but it is still
+    # the bearer of a credential until it is spent.
+    _audit(db, "gcp_adk_code_submitted", request, user=current_user,
+           resource_type="gcp_adk", resource_id=session.id)
+    return session.as_dict()
+
+
+@router.post("/gcp-adk-refresh/session/{session_id}/cancel", response_model=GcpAdkSessionResponse)
+async def gcp_adk_cancel(
+    session_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Abandon a sign-in, stopping gcloud so the next attempt can take the lock."""
+    _adk_actor(current_user)
+    _adk_config_or_404()
+    session = _session_or_404(session_id)
+    await session.cancel()
+    _audit(db, "gcp_adk_refresh_cancelled", request, user=current_user,
+           resource_type="gcp_adk", resource_id=session.id)
+    return session.as_dict()

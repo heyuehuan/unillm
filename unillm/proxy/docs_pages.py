@@ -176,8 +176,12 @@ def context() -> Dict[str, str]:
     """
     from unillm.proxy.auth import get_general_settings
     from unillm.proxy.ssh_auth import get_ssh_mode
+    from unillm.proxy.gcp_adk import load_config
 
-    return {"ssh_mode": get_ssh_mode(get_general_settings())}
+    return {
+        "ssh_mode": get_ssh_mode(get_general_settings()),
+        "gcp_adk": "enabled" if load_config().enabled else "disabled",
+    }
 
 
 def load_pages(values: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:

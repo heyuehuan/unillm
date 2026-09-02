@@ -1,5 +1,5 @@
 import { navigate } from '../router.js'
-import { IcLayout, IcFolder, IcKey, IcLog, IcShield, IcSettings, IcSun, IcMoon, IcChart, IcZap, IcLogOut, IcBook } from './Icons.jsx'
+import { IcLayout, IcFolder, IcKey, IcLog, IcShield, IcSettings, IcSun, IcMoon, IcChart, IcZap, IcLogOut, IcBook, IcCloud } from './Icons.jsx'
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', Icon: IcLayout },
@@ -10,6 +10,7 @@ const NAV_ITEMS = [
 ]
 const ORG_ITEMS = [
   { id: 'documentation', label: 'Documentation', Icon: IcBook },
+  { id: 'gcp-auth', label: 'Google Cloud auth', Icon: IcCloud },
   { id: 'admin', label: 'Admin', Icon: IcShield, adminOnly: true },
   { id: 'sshkeys', label: 'My SSH Keys', Icon: IcKey },
   { id: 'settings', label: 'Settings', Icon: IcSettings },
@@ -60,7 +61,7 @@ export function Topbar({ route, displayTheme, onToggleTheme }) {
   const labels = {
     dashboard: 'Dashboard', projects: 'Projects',
     models: 'Models', logs: 'Logs', usage: 'Usage', admin: 'Admin', sshkeys: 'My SSH Keys',
-    documentation: 'Documentation', settings: 'Settings',
+    documentation: 'Documentation', settings: 'Settings', 'gcp-auth': 'Google Cloud auth',
   }
   const themeLabel = displayTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'
   return (

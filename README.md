@@ -68,6 +68,7 @@ model_list:
       model: gemini-2.5-flash-lite        # actual Gemini model
       project: your-gcp-project-id
       location: us-central1
+      supports_logprobs: true             # opt in to logprobs (see below)
 
   # Vertex AI with customer-managed encryption key
   - model_name: gemini-secure
@@ -89,7 +90,41 @@ model_list:
 general_settings:
   port: 4000
   # ssh_required: none | warning | enforce   (see SSH attribution below)
+  # drop_params: false   # strip unsupported params instead of returning 400
 ```
+
+### Log probabilities
+
+`logprobs` / `top_logprobs` are opt-in per model. Add `supports_logprobs: true` to a
+model's `unillm_params` and clients can request them the usual OpenAI way:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-..." \
+  -d '{"model": "gemini-2.5-flash-lite", "messages": [{"role":"user","content":"hi"}],
+       "logprobs": true, "top_logprobs": 5}'
+```
+
+Responses carry OpenAI's shape (`choices[].logprobs.content[].{token,logprob,top_logprobs}`)
+regardless of backend — UniLLM translates Gemini's `logprobsResult` into it, and passes
+vLLM's through unchanged.
+
+It's opt-in because backend support is per-model and shifts between releases: on Vertex AI
+`gemini-2.0/2.5-flash` serve logprobs, while `gemini-3.x` reject them with *"Logprobs is not
+supported for this model"*. Enabling it on a model that can't do it turns a clear 400 from
+UniLLM into an opaque upstream error, so confirm the model serves logprobs before flipping
+the flag.
+
+Requesting logprobs from a model without the flag returns **400** naming the model and the
+rejected params; the full explanation (which flag to set, on which backend model) goes to
+the request log rather than to the API caller. Set `drop_params: true` under
+`general_settings` to strip unsupported params and complete the request instead — same
+semantics as litellm's `litellm_settings: drop_params`.
+
+Coverage: chat completions on all three backends. `/v1/completions` supports logprobs only
+on vLLM — the Vertex handlers synthesize text completions from a chat call, and Gemini's
+per-token output can't be reshaped into the legacy `{tokens, token_logprobs, text_offset}`
+format without inventing byte offsets.
 
 ### 3. Set required secrets and bootstrap the first admin
 

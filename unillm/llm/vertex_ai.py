@@ -18,19 +18,34 @@ import httpx
 from google.auth.credentials import Credentials
 
 from unillm._logging import verbose_proxy_logger
+from unillm.llm.params import CHAT_LOGPROB_PARAMS
 from unillm.types import (
     ChatCompletionResponse,
+    ChatCompletionTokenLogprob,
     Choice,
+    ChoiceLogprobs,
     CompletionResponse,
     Message,
     TextChoice,
+    TopLogprob,
     Usage,
 )
 
 
 class VertexAIHandler:
     """Handler for Vertex AI Gemini API calls using Application Default Credentials"""
-    
+
+    # Vertex serves logprobs via generationConfig.responseLogprobs, but only on some
+    # models — gemini-2.0/2.5-flash do, gemini-3.x reply "Logprobs is not supported
+    # for this model". Which ones is a config question (supports_logprobs), not
+    # something to pin to a model list here.
+    SUPPORTED_CHAT_PARAMS = frozenset(CHAT_LOGPROB_PARAMS)
+    # /v1/completions is synthesized from a chat call here, and Gemini's per-token
+    # output cannot be reshaped into the legacy flat {tokens, token_logprobs,
+    # text_offset} form without inventing byte offsets. Declared unsupported rather
+    # than answered with a plausible-looking approximation.
+    SUPPORTED_TEXT_PARAMS = frozenset()
+
     def __init__(
         self,
         project: Optional[str] = None,
@@ -151,6 +166,8 @@ class VertexAIHandler:
         n: Optional[int] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        logprobs: Optional[bool] = None,
+        top_logprobs: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Build Gemini generation config from OpenAI parameters"""
         config = {}
@@ -174,9 +191,56 @@ class VertexAIHandler:
             config["presencePenalty"] = presence_penalty
         if frequency_penalty is not None:
             config["frequencyPenalty"] = frequency_penalty
+        # OpenAI's bool `logprobs` and int `top_logprobs` collapse onto Gemini's
+        # `responseLogprobs` (bool) and `logprobs` (top-k count) — same split, but the
+        # name `logprobs` means different things on the two sides.
+        if logprobs is not None:
+            config["responseLogprobs"] = logprobs
+        # Gemini's top-k count starts at 1, while OpenAI's top_logprobs=0 is a valid
+        # request meaning "no alternatives" — expressed here by omitting the field
+        # rather than forwarding a 0 Vertex rejects.
+        if logprobs and top_logprobs:
+            config["logprobs"] = top_logprobs
 
         return config
-    
+
+    @staticmethod
+    def _convert_logprobs(logprobs_result: Optional[Dict[str, Any]]) -> Optional[ChoiceLogprobs]:
+        """
+        Convert Gemini's logprobsResult into OpenAI's ChoiceLogprobs.
+
+        Gemini returns two parallel lists: chosenCandidates (the emitted token at each
+        position) and topCandidates (the alternatives considered there). OpenAI nests
+        the alternatives under each chosen token, so they are zipped by position.
+        topCandidates is absent when the request did not ask for top-k, and can be
+        shorter than chosenCandidates, so it is indexed defensively.
+        """
+        if not logprobs_result:
+            return None
+        chosen = logprobs_result.get("chosenCandidates")
+        if not chosen:
+            # `avgLogprobs` (a single float) is always present on candidates and is
+            # not per-token data — deliberately not mapped to anything here.
+            return None
+
+        top_candidates = logprobs_result.get("topCandidates") or []
+        content = []
+        for index, candidate in enumerate(chosen):
+            alternatives = []
+            if index < len(top_candidates):
+                for alt in top_candidates[index].get("candidates") or []:
+                    alternatives.append(TopLogprob(
+                        token=alt.get("token", ""),
+                        logprob=alt.get("logProbability", 0.0),
+                    ))
+            content.append(ChatCompletionTokenLogprob(
+                token=candidate.get("token", ""),
+                logprob=candidate.get("logProbability", 0.0),
+                top_logprobs=alternatives,
+            ))
+
+        return ChoiceLogprobs(content=content)
+
     def _convert_gemini_response_to_openai(
         self, gemini_response: Dict[str, Any], model: str
     ) -> ChatCompletionResponse:
@@ -211,9 +275,10 @@ class VertexAIHandler:
                     role="assistant",
                     content="".join(text_parts) if text_parts else None
                 ),
-                finish_reason=finish_reason
+                finish_reason=finish_reason,
+                logprobs=self._convert_logprobs(candidate.get("logprobsResult")),
             ))
-        
+
         prompt_tokens = usage_metadata.get("promptTokenCount", 0)
         completion_tokens = usage_metadata.get("candidatesTokenCount", 0)
         total_tokens = usage_metadata.get("totalTokenCount", prompt_tokens + completion_tokens)
@@ -243,6 +308,8 @@ class VertexAIHandler:
         stream: bool = False,
         project: Optional[str] = None,
         location: Optional[str] = None,
+        logprobs: Optional[bool] = None,
+        top_logprobs: Optional[int] = None,
         **kwargs,
     ) -> Union[ChatCompletionResponse, AsyncIterator[str]]:
         """
@@ -267,6 +334,8 @@ class VertexAIHandler:
             n=n,
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
+            logprobs=logprobs,
+            top_logprobs=top_logprobs,
         )
 
         request_body = {"contents": contents}
@@ -351,12 +420,18 @@ class VertexAIHandler:
                 }
                 finish_reason = finish_reason_map.get(finish_reason, "stop")
             
-            choices.append({
+            choice: Dict[str, Any] = {
                 "index": i,
                 "delta": delta,
                 "finish_reason": finish_reason,
-            })
-        
+            }
+            # In OpenAI's streaming format logprobs sit alongside `delta`, not inside
+            # it, and cover only the tokens carried by this chunk.
+            chunk_logprobs = self._convert_logprobs(candidate.get("logprobsResult"))
+            if chunk_logprobs is not None:
+                choice["logprobs"] = chunk_logprobs.model_dump()
+            choices.append(choice)
+
         chunk = {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion.chunk",

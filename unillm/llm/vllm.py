@@ -22,12 +22,16 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Union
 import httpx
 
 from unillm._logging import verbose_proxy_logger
+from unillm.llm.params import CHAT_LOGPROB_PARAMS, TEXT_LOGPROB_PARAMS
 from unillm.types import (
     ChatCompletionResponse,
+    ChatCompletionTokenLogprob,
     Choice,
+    ChoiceLogprobs,
     CompletionResponse,
     Message,
     TextChoice,
+    TopLogprob,
     Usage,
 )
 
@@ -39,6 +43,12 @@ class VLLMHandler:
     Forwards requests directly to the server's /v1/chat/completions and
     /v1/completions endpoints and maps the response back to UniLLM types.
     """
+
+    # vLLM speaks the OpenAI API natively, so logprobs need no translation in either
+    # direction — including the legacy flat shape on /v1/completions, which the
+    # Gemini-backed handlers cannot produce.
+    SUPPORTED_CHAT_PARAMS = frozenset(CHAT_LOGPROB_PARAMS)
+    SUPPORTED_TEXT_PARAMS = frozenset(TEXT_LOGPROB_PARAMS)
 
     def __init__(
         self,
@@ -73,6 +83,8 @@ class VLLMHandler:
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         user: Optional[str] = None,
+        logprobs: Optional[bool] = None,
+        top_logprobs: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
@@ -98,7 +110,35 @@ class VLLMHandler:
             body["frequency_penalty"] = frequency_penalty
         if user is not None:
             body["user"] = user
+        if logprobs is not None:
+            body["logprobs"] = logprobs
+        # vLLM rejects top_logprobs unless logprobs is also true, so only forward it
+        # alongside an enabled logprobs rather than letting the server 400.
+        if top_logprobs is not None and logprobs:
+            body["top_logprobs"] = top_logprobs
         return body
+
+    @staticmethod
+    def _parse_logprobs(raw: Optional[Dict[str, Any]]) -> Optional[ChoiceLogprobs]:
+        """Map an OpenAI-shaped choice.logprobs object into UniLLM types."""
+        if not raw:
+            return None
+        content = []
+        for entry in raw.get("content") or []:
+            content.append(ChatCompletionTokenLogprob(
+                token=entry.get("token", ""),
+                logprob=entry.get("logprob", 0.0),
+                bytes=entry.get("bytes"),
+                top_logprobs=[
+                    TopLogprob(
+                        token=alt.get("token", ""),
+                        logprob=alt.get("logprob", 0.0),
+                        bytes=alt.get("bytes"),
+                    )
+                    for alt in entry.get("top_logprobs") or []
+                ],
+            ))
+        return ChoiceLogprobs(content=content) if content else None
 
     def _parse_chat_response(self, data: Dict[str, Any]) -> ChatCompletionResponse:
         """Parse an OpenAI-format chat completion response into UniLLM types."""
@@ -112,6 +152,7 @@ class VLLMHandler:
                     content=msg.get("content"),
                 ),
                 finish_reason=c.get("finish_reason"),
+                logprobs=self._parse_logprobs(c.get("logprobs")),
             ))
 
         usage_data = data.get("usage") or {}
@@ -143,6 +184,8 @@ class VLLMHandler:
         frequency_penalty: Optional[float] = None,
         user: Optional[str] = None,
         stream: bool = False,
+        logprobs: Optional[bool] = None,
+        top_logprobs: Optional[int] = None,
         **kwargs,
     ) -> Union[ChatCompletionResponse, AsyncIterator[str]]:
         """Forward a chat completion request to the vLLM server."""
@@ -159,6 +202,8 @@ class VLLMHandler:
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
             user=user,
+            logprobs=logprobs,
+            top_logprobs=top_logprobs,
         )
 
         verbose_proxy_logger.debug(f"vLLM request: POST {url} model={model}")
@@ -202,6 +247,7 @@ class VLLMHandler:
         frequency_penalty: Optional[float] = None,
         user: Optional[str] = None,
         stream: bool = False,
+        logprobs: Optional[int] = None,
         **kwargs,
     ) -> Union[CompletionResponse, AsyncIterator[str]]:
         """Forward a text completion request to the vLLM server."""
@@ -231,6 +277,8 @@ class VLLMHandler:
             body["frequency_penalty"] = frequency_penalty
         if user is not None:
             body["user"] = user
+        if logprobs is not None:
+            body["logprobs"] = logprobs
 
         verbose_proxy_logger.debug(f"vLLM request: POST {url} model={model}")
 
@@ -251,6 +299,9 @@ class VLLMHandler:
                 index=c.get("index", 0),
                 text=c.get("text", ""),
                 finish_reason=c.get("finish_reason"),
+                # Legacy flat shape; vLLM emits it exactly as OpenAI does, so it
+                # passes through untouched.
+                logprobs=c.get("logprobs"),
             ))
 
         usage_data = data.get("usage") or {}

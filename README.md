@@ -388,6 +388,7 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 | `UNILLM_LOGIN_IP_RATE_LIMIT` | No | Ceiling on login attempts per client IP regardless of username. Default `100/60`. `off` disables. |
 | `UNILLM_LOGIN_FAILURE_LIMIT` | No | Failed logins allowed per username across all IPs. Default `5/900`. Cleared on a successful login; `off` disables. |
 | `UNILLM_DOCS_RATE_LIMIT` | No | Requests per client IP to `/docs`, `/redoc` and `/openapi.json`. Default `30/60`. `off` disables. |
+| `UNILLM_LOGIN_AUDIT_LIMIT` | No | How often a throttled login adds an audit row, per key. Default `1/300`. `off` records every rejection. |
 | `UNILLM_SECURITY_HEADERS` | No | Default `true`: send CSP, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` and HSTS. `false` sends none of them. |
 | `UNILLM_CSP` | No | Replace the app Content-Security-Policy outright. `off` sends no policy but keeps the other headers. The `/docs` and `/redoc` policy is separate and unaffected. |
 | `UNILLM_HSTS_MAX_AGE` | No | HSTS max-age in seconds, default `31536000`. `0` disables. Only sent over HTTPS. |

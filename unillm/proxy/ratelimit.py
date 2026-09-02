@@ -212,6 +212,16 @@ login_user_limiter = _limiter_from_env("UNILLM_LOGIN_FAILURE_LIMIT", (5, 900.0))
 # Public docs endpoints, per client IP.
 docs_limiter = _limiter_from_env("UNILLM_DOCS_RATE_LIMIT", (30, 60.0))
 
+# How often a throttled login may add a row to the audit trail, per key.
+#
+# Rejecting a request has to be cheaper than serving it, or the limiter is not a
+# limiter. Auditing every rejection broke that: a blocked caller could retry as
+# fast as it liked and each attempt still cost a synchronous insert into an
+# append-only table. One row per key per window records that throttling happened
+# and who it hit, without the flood the limiter just rejected turning into
+# unbounded database writes. Set to "off" to record every rejection.
+login_audit_limiter = _limiter_from_env("UNILLM_LOGIN_AUDIT_LIMIT", (1, 300.0))
+
 
 def login_pair_key(ip: Optional[str], username_key: str) -> Optional[str]:
     """
@@ -226,7 +236,9 @@ def login_pair_key(ip: Optional[str], username_key: str) -> Optional[str]:
 def reload_from_env() -> None:
     """Re-read limits from the environment (test helper)."""
     global login_attempt_limiter, login_ip_limiter, login_user_limiter, docs_limiter
+    global login_audit_limiter
     login_attempt_limiter = _limiter_from_env("UNILLM_LOGIN_RATE_LIMIT", (30, 60.0))
     login_ip_limiter = _limiter_from_env("UNILLM_LOGIN_IP_RATE_LIMIT", (100, 60.0))
     login_user_limiter = _limiter_from_env("UNILLM_LOGIN_FAILURE_LIMIT", (5, 900.0))
     docs_limiter = _limiter_from_env("UNILLM_DOCS_RATE_LIMIT", (30, 60.0))
+    login_audit_limiter = _limiter_from_env("UNILLM_LOGIN_AUDIT_LIMIT", (1, 300.0))

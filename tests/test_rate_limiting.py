@@ -303,6 +303,31 @@ def test_rate_limited_login_is_audited(client, db, monkeypatch):
     assert len(after) > len(before)
 
 
+def test_repeated_throttled_attempts_do_not_flood_the_audit_table(client, db, monkeypatch):
+    """
+    Rejecting a request must be cheaper than serving it. Auditing every rejection
+    broke that: a blocked caller retries as fast as it likes, and each attempt still
+    bought a synchronous insert into an append-only table — so the throttle bounded
+    password hashing but not database growth. One row per key per window is enough.
+    """
+    _small_limits(monkeypatch, pair=1)
+    before, _ = crud.query_audit_logs(db, action="login_rate_limited")
+
+    for _ in range(30):
+        assert _login(client, "flooder", "wrong").status_code in (401, 429)
+
+    after, _ = crud.query_audit_logs(db, action="login_rate_limited")
+    assert len(after) - len(before) == 1
+
+
+def test_a_different_key_still_gets_its_own_audit_row(monkeypatch):
+    """Sampling must not hide a second victim behind the first one's row."""
+    monkeypatch.setattr(ratelimit, "login_audit_limiter", SlidingWindowLimiter(1, 300.0))
+    assert ratelimit.login_audit_limiter.hit("ip-a") is None
+    assert ratelimit.login_audit_limiter.hit("ip-a") is not None
+    assert ratelimit.login_audit_limiter.hit("ip-b") is None
+
+
 # --- public docs ---------------------------------------------------------------------
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])

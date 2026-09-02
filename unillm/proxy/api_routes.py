@@ -383,8 +383,13 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
         ratelimit.login_attempt_limiter.record(pair_key)
         ratelimit.login_ip_limiter.record(ip)
     if retry_after is not None:
-        _audit(db, "login_rate_limited", request, severity="warning",
-               detail={"username": req.username})
+        # Sampled, not per attempt: see login_audit_limiter. A rejected caller can
+        # retry without limit, so a row per rejection would turn a throttled flood
+        # into unbounded writes to the audit table — the cost the throttle exists to
+        # avoid. One row per key per window shows that throttling happened.
+        if ratelimit.login_audit_limiter.hit(pair_key or ip or user_key) is None:
+            _audit(db, "login_rate_limited", request, severity="warning",
+                   detail={"username": req.username})
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Please wait and try again.",

@@ -384,7 +384,8 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
 | `UNILLM_CORS_ORIGINS` | No | Comma-separated cross-origin allowlist. Default: same-origin only. |
 | `UNILLM_TRUST_PROXY_HEADERS` | No | `true` → trust `X-Forwarded-For` for client IPs (only behind a trusted reverse proxy). |
 | `UNILLM_TRUSTED_PROXY_HOPS` | No | Number of reverse proxies in front of UniLLM (default `1`). Decides which `X-Forwarded-For` entry is the client. |
-| `UNILLM_LOGIN_RATE_LIMIT` | No | Login attempts allowed per client IP, as `<count>/<seconds>`. Default `30/60`. `off` disables. |
+| `UNILLM_LOGIN_RATE_LIMIT` | No | Login attempts allowed per client IP **and username**, as `<count>/<seconds>`. Default `30/60`. `off` disables. |
+| `UNILLM_LOGIN_IP_RATE_LIMIT` | No | Ceiling on login attempts per client IP regardless of username. Default `100/60`. `off` disables. |
 | `UNILLM_LOGIN_FAILURE_LIMIT` | No | Failed logins allowed per username across all IPs. Default `5/900`. Cleared on a successful login; `off` disables. |
 | `UNILLM_DOCS_RATE_LIMIT` | No | Requests per client IP to `/docs`, `/redoc` and `/openapi.json`. Default `30/60`. `off` disables. |
 | `UNILLM_SECURITY_HEADERS` | No | Default `true`: send CSP, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` and HSTS. `false` sends none of them. |
@@ -421,7 +422,8 @@ signed = sign_api_key("sk-your-api-key")   # use signed.full_key as your api_key
   `X-Forwarded-For`, because the leading entries of that header are written by the client. Leaving the trust flag off behind a
   proxy is also wrong: every client then shares the proxy's address, so one caller's failed logins throttle everyone.
 - Security headers are on by default. If your reverse proxy also sets them, drop one of the two — UniLLM only fills in headers that are not already present, but a proxy that appends rather than replaces will produce duplicates.
-- Review the built-in rate limits (`UNILLM_LOGIN_RATE_LIMIT`, `UNILLM_LOGIN_FAILURE_LIMIT`, `UNILLM_DOCS_RATE_LIMIT`). They are per-process, so with several replicas each enforces its own share — add a shared limiter at the reverse proxy if you run more than one.
+- Review the built-in rate limits (`UNILLM_LOGIN_RATE_LIMIT`, `UNILLM_LOGIN_IP_RATE_LIMIT`, `UNILLM_LOGIN_FAILURE_LIMIT`, `UNILLM_DOCS_RATE_LIMIT`). They are per-process, so with several replicas each enforces its own share — add a shared limiter at the reverse proxy if you run more than one.
+- Logins are budgeted three ways: per (IP, username) pair, per IP, and per username across all addresses. The pair budget is what keeps one attacker's guesses from throttling everybody who shares an address; the per-IP ceiling still bounds how much password-hashing work a single address can demand.
 - Set model pricing in the console so request costs are recorded.
 - Back up the database — it holds users, hashed keys, and the audit trail.
 

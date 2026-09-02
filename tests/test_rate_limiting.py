@@ -51,6 +51,21 @@ def _login(client, username, password):
     return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
+def _small_limits(monkeypatch, pair=3, ip=100, user=5):
+    """
+    Install small budgets so a test can exhaust one without running hundreds of
+    bcrypt verifications. Returns the limiters it installed.
+    """
+    limiters = {
+        "login_attempt_limiter": SlidingWindowLimiter(pair, 60.0),
+        "login_ip_limiter": SlidingWindowLimiter(ip, 60.0),
+        "login_user_limiter": SlidingWindowLimiter(user, 900.0),
+    }
+    for name, limiter in limiters.items():
+        monkeypatch.setattr(ratelimit, name, limiter)
+    return limiters
+
+
 # --- the limiter itself --------------------------------------------------------------
 
 def test_limiter_blocks_after_limit_and_reports_retry_after():
@@ -128,34 +143,60 @@ def test_parse_limit(spec, expected):
 
 # --- login endpoint ------------------------------------------------------------------
 
-def test_login_is_rate_limited_per_ip(client, victim):
-    ratelimit.login_ip_limiter.clear()
-    ratelimit.login_user_limiter.clear()
-    limit = ratelimit.login_ip_limiter.limit
-    assert limit > 0, "the per-IP login limiter must be on by default"
+def test_login_is_rate_limited_per_ip_and_username(client, monkeypatch):
+    """Guessing one account from one address runs out of budget."""
+    limits = _small_limits(monkeypatch, pair=3)
+    assert ratelimit.login_attempt_limiter.limit > 0, "the login limiter must be on by default"
 
-    # Spread failures over distinct usernames so the per-username limiter is not
-    # what stops us — this test is specifically about the per-IP budget.
-    codes = [_login(client, f"nobody-{i}", "wrong").status_code for i in range(limit + 3)]
-    assert codes[:limit] == [401] * limit
-    assert codes[limit:] == [429] * 3
+    codes = [_login(client, "nobody", "wrong").status_code for _ in range(limits["login_attempt_limiter"].limit + 2)]
+    assert codes[:3] == [401] * 3
+    assert codes[3:] == [429] * 2
 
 
-def test_rate_limited_response_carries_retry_after(client):
-    ratelimit.login_ip_limiter.clear()
-    for i in range(ratelimit.login_ip_limiter.limit):
-        _login(client, f"nobody-{i}", "wrong")
-    r = _login(client, "nobody-x", "wrong")
+def test_one_accounts_failures_do_not_lock_out_another_on_the_same_address(client, victim, monkeypatch):
+    """
+    The reason the budget is keyed on the pair and not the address alone.
+
+    Whenever an address is shared — a NAT, or a reverse proxy whose forwarded
+    headers are not trusted — a per-IP-only budget lets one attacker spend it on
+    invented usernames and take every real user behind that address offline. Their
+    guesses must only cost them their own buckets.
+    """
+    _small_limits(monkeypatch, pair=3)
+
+    for _ in range(5):
+        _login(client, "attackers-target", "wrong")
+    assert _login(client, "attackers-target", "wrong").status_code == 429, "attacker is throttled"
+
+    # Same source address, different account: unaffected.
+    assert _login(client, victim["username"], victim["password"]).status_code == 200
+
+
+def test_a_flood_of_invented_usernames_still_meets_the_per_ip_ceiling(client, monkeypatch):
+    """
+    Splitting the budget by username hands an attacker a fresh bucket per name, so
+    a ceiling on the address is what bounds the bcrypt work they can demand.
+    """
+    _small_limits(monkeypatch, pair=3, ip=6)
+    codes = [_login(client, f"nobody-{i}", "wrong").status_code for i in range(8)]
+    assert codes[:6] == [401] * 6
+    assert codes[6:] == [429] * 2
+
+
+def test_rate_limited_response_carries_retry_after(client, monkeypatch):
+    _small_limits(monkeypatch, pair=2)
+    for _ in range(2):
+        _login(client, "nobody", "wrong")
+    r = _login(client, "nobody", "wrong")
     assert r.status_code == 429
     assert int(r.headers["retry-after"]) >= 1
 
 
-def test_correct_password_is_refused_while_rate_limited(client, victim):
+def test_correct_password_is_refused_while_rate_limited(client, victim, monkeypatch):
     """The whole point: exhausting the budget must stop the attacker mid-search."""
-    ratelimit.login_ip_limiter.clear()
-    ratelimit.login_user_limiter.clear()
-    for i in range(ratelimit.login_ip_limiter.limit):
-        _login(client, f"nobody-{i}", "wrong")
+    _small_limits(monkeypatch, pair=3)
+    for _ in range(3):
+        _login(client, victim["username"], "wrong-password")
     assert _login(client, victim["username"], victim["password"]).status_code == 429
 
 
@@ -170,22 +211,26 @@ def test_failed_logins_are_limited_per_username_across_ips(client, victim):
     assert limit > 0
 
     for _ in range(limit):
-        # Clear the per-IP budget each round to simulate a fresh source address.
+        # Clear the address-keyed budgets each round to simulate a fresh source.
+        ratelimit.login_attempt_limiter.clear()
         ratelimit.login_ip_limiter.clear()
         assert _login(client, victim["username"], "wrong-password").status_code == 401
+    ratelimit.login_attempt_limiter.clear()
     ratelimit.login_ip_limiter.clear()
     assert _login(client, victim["username"], "wrong-password").status_code == 429
 
 
-def test_successful_login_clears_the_username_failure_count(client, victim):
+def test_successful_login_clears_the_failure_counts(client, victim, monkeypatch):
     """A few typos followed by the right password must not leave the user throttled."""
-    ratelimit.login_ip_limiter.clear()
-    ratelimit.login_user_limiter.clear()
-    for _ in range(ratelimit.login_user_limiter.limit - 1):
+    # Pair budget deliberately above the typo count: this test is about the reset,
+    # not about tripping the limiter.
+    _small_limits(monkeypatch, pair=6, user=5)
+    for _ in range(4):
         _login(client, victim["username"], "wrong-password")
     assert _login(client, victim["username"], victim["password"]).status_code == 200
-    # Budget is back to full: another near-limit run of typos still is not blocked.
-    for _ in range(ratelimit.login_user_limiter.limit - 1):
+    # Both address- and username-keyed budgets are back to full: another near-limit
+    # run of typos still is not blocked.
+    for _ in range(4):
         assert _login(client, victim["username"], "wrong-password").status_code == 401
 
 
@@ -194,18 +239,19 @@ def test_username_counter_is_case_insensitive(client, victim):
     ratelimit.login_ip_limiter.clear()
     ratelimit.login_user_limiter.clear()
     for _ in range(ratelimit.login_user_limiter.limit):
+        ratelimit.login_attempt_limiter.clear()
         ratelimit.login_ip_limiter.clear()
         _login(client, victim["username"].upper(), "wrong-password")
+    ratelimit.login_attempt_limiter.clear()
     ratelimit.login_ip_limiter.clear()
     assert _login(client, victim["username"], "wrong-password").status_code == 429
 
 
-def test_rate_limited_login_is_audited(client, db, victim):
-    ratelimit.login_ip_limiter.clear()
-    ratelimit.login_user_limiter.clear()
+def test_rate_limited_login_is_audited(client, db, monkeypatch):
+    _small_limits(monkeypatch, pair=2)
     before, _ = crud.query_audit_logs(db, action="login_rate_limited")
-    for i in range(ratelimit.login_ip_limiter.limit + 1):
-        _login(client, f"nobody-{i}", "wrong")
+    for _ in range(3):
+        _login(client, "nobody", "wrong")
     after, _ = crud.query_audit_logs(db, action="login_rate_limited")
     assert len(after) > len(before)
 

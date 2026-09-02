@@ -371,9 +371,17 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
     # username exists — so this adds no enumeration signal.
     ip = _client_ip(request)
     user_key = _login_key(req.username)
-    retry_after = ratelimit.login_ip_limiter.hit(ip)
+    pair_key = ratelimit.login_pair_key(ip, user_key)
+    # Decide against every budget before spending any of them, so a request rejected
+    # by one limiter does not leave a hit recorded on another.
+    retry_after = ratelimit.login_attempt_limiter.check(pair_key)
+    if retry_after is None:
+        retry_after = ratelimit.login_ip_limiter.check(ip)
     if retry_after is None:
         retry_after = ratelimit.login_user_limiter.check(user_key)
+    if retry_after is None:
+        ratelimit.login_attempt_limiter.record(pair_key)
+        ratelimit.login_ip_limiter.record(ip)
     if retry_after is not None:
         _audit(db, "login_rate_limited", request, severity="warning",
                detail={"username": req.username})
@@ -401,8 +409,11 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
                detail={"username": req.username, "reason": "password_login_disabled"})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password login is disabled for this account")
     # Genuine owner proved themselves — drop the failure history so a burst of
-    # typos does not keep throttling them.
+    # typos does not keep throttling them. The per-IP ceiling is deliberately not
+    # cleared: it bounds work per address, and letting one valid credential reset it
+    # would hand an attacker with any account an unlimited bcrypt budget.
     ratelimit.login_user_limiter.reset(user_key)
+    ratelimit.login_attempt_limiter.reset(pair_key)
     _audit(db, "login_success", request, user=user)
     return TokenResponse(access_token=_create_token(user))
 

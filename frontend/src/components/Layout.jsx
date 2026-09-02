@@ -10,13 +10,16 @@ const NAV_ITEMS = [
 ]
 const ORG_ITEMS = [
   { id: 'documentation', label: 'Documentation', Icon: IcBook },
-  { id: 'gcp-auth', label: 'Google Cloud auth', Icon: IcCloud },
+  // `feature` names a deployment switch from /api/config. Absent from the sidebar
+  // when the deployment has not turned it on, because the endpoints behind it 404
+  // and a nav entry that leads nowhere reads as a broken console.
+  { id: 'gcp-auth', label: 'Google Cloud auth', Icon: IcCloud, feature: 'gcpAuth' },
   { id: 'admin', label: 'Admin', Icon: IcShield, adminOnly: true },
   { id: 'sshkeys', label: 'My SSH Keys', Icon: IcKey },
   { id: 'settings', label: 'Settings', Icon: IcSettings },
 ]
 
-export function Sidebar({ route, user, onLogout }) {
+export function Sidebar({ route, user, features = {}, onLogout }) {
   const isAdmin = user?.global_role === 'admin'
   const initials = user ? user.username.slice(0, 2).toUpperCase() : '?'
 
@@ -35,12 +38,14 @@ export function Sidebar({ route, user, onLogout }) {
           </button>
         ))}
         <div className="nav-group">Account</div>
-        {ORG_ITEMS.filter(x => !x.adminOnly || isAdmin).map(({ id, label, Icon }) => (
-          <button key={id} className={`nav-item${route === id ? ' active' : ''}`} onClick={() => navigate(id)}>
-            <Icon className="nav-icon" size={16} />
-            <span>{label}</span>
-          </button>
-        ))}
+        {ORG_ITEMS
+          .filter(x => (!x.adminOnly || isAdmin) && (!x.feature || features[x.feature]))
+          .map(({ id, label, Icon }) => (
+            <button key={id} className={`nav-item${route === id ? ' active' : ''}`} onClick={() => navigate(id)}>
+              <Icon className="nav-icon" size={16} />
+              <span>{label}</span>
+            </button>
+          ))}
       </nav>
 
       <div className="sidebar-foot">

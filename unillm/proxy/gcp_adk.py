@@ -64,6 +64,13 @@ SESSION_TIMEOUT_SECONDS = 900
 # real error when the login fails; not the whole session.
 _OUTPUT_TAIL_CHARS = 4000
 
+# The one switch that turns this feature on, read from the top of `general_settings`.
+# It sits there rather than inside the `gcp_adk` block because it grants a privilege
+# — the console may run gcloud on the proxy host — and that has to be legible without
+# reading the block that tunes the feature. Off means off all the way through: no
+# endpoints, no console page, no entry in the sidebar.
+ALLOW_FLAG = "ALLOW_GCP_ADC_TOKEN_REFRESH"
+
 
 def _utcnow() -> datetime:
     """Naive UTC, matching how the log tables store timestamps."""
@@ -83,9 +90,10 @@ class AdkConfig:
     login_args: Tuple[str, ...] = DEFAULT_LOGIN_ARGS
     stale_after_seconds: int = DEFAULT_STALE_AFTER_SECONDS
     gcloud_path: str = "gcloud"
-    # Off by default. Spawning gcloud is a real privilege, and a deployment that
-    # runs on a service-account key file or a GCE metadata identity has no user
-    # token to refresh — for those, this feature is noise at best.
+    # Set by ALLOW_GCP_ADC_TOKEN_REFRESH, and off unless a deployment says otherwise.
+    # Spawning gcloud is a real privilege, and a deployment that runs on a
+    # service-account key file or a GCE metadata identity has no user token to
+    # refresh — for those, this feature is noise at best.
     enabled: bool = False
 
     @property
@@ -94,16 +102,68 @@ class AdkConfig:
         return self.enabled and bool(shutil.which(self.gcloud_path))
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """
+    Read a config value as a switch.
+
+    YAML already yields real booleans for `true`/`false`, but a value that arrived
+    as text — a quoted "false", a templated config — must not count as on merely
+    for being a non-empty string. Anything unrecognizable falls back rather than
+    guessing, because guessing wrong here turns a feature on that a deployment
+    meant to keep off.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+        verbose_proxy_logger.warning(
+            "Could not read %r as a true/false switch; treating it as %s", value, default
+        )
+        return default
+    return bool(value)
+
+
+def _refresh_allowed(settings: Dict[str, Any], block: Dict[str, Any]) -> bool:
+    """
+    Whether this deployment permits the console to renew Google credentials.
+
+    `ALLOW_GCP_ADC_TOKEN_REFRESH` is the switch, matched without regard to case so
+    that a config written in the surrounding lowercase style still works. The older
+    `gcp_adk.enabled` is still honoured for configs that predate the flag, but only
+    when the flag is absent entirely — a deployment that spells out "no" must not be
+    overridden by a leftover key.
+    """
+    for key, value in settings.items():
+        if isinstance(key, str) and key.upper() == ALLOW_FLAG:
+            return _as_bool(value)
+    if "enabled" in block:
+        verbose_proxy_logger.warning(
+            "general_settings.gcp_adk.enabled is deprecated; use general_settings.%s",
+            ALLOW_FLAG,
+        )
+        return _as_bool(block.get("enabled"))
+    return False
+
+
 def load_config() -> AdkConfig:
     """
-    Read the `gcp_adk` block from the YAML `general_settings`.
+    Read the feature switch and the `gcp_adk` block from the YAML `general_settings`.
 
     Imported late: this module is reached from the management router, which the
     proxy server imports at startup, so a module-level import would close the loop.
     """
     from unillm.proxy import proxy_server
 
-    raw = (proxy_server.general_settings or {}).get("gcp_adk") or {}
+    settings = proxy_server.general_settings
+    if not isinstance(settings, dict):
+        settings = {}
+    raw = settings.get("gcp_adk") or {}
     if not isinstance(raw, dict):
         verbose_proxy_logger.warning("general_settings.gcp_adk is not a mapping; ignoring it")
         raw = {}
@@ -125,7 +185,7 @@ def load_config() -> AdkConfig:
         login_args=tuple(str(a) for a in login_args),
         stale_after_seconds=max(60, stale_after),
         gcloud_path=(raw.get("gcloud_path") or "gcloud"),
-        enabled=bool(raw.get("enabled", False)),
+        enabled=_refresh_allowed(settings, raw),
     )
 
 

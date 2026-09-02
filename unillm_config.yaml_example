@@ -33,9 +33,12 @@ general_settings:
   # The credentials behind every Gemini call are a user login that Google expires
   # roughly daily. With this on, the console offers a "Google Cloud auth" page where
   # any signed-in user can test the credentials and, when they are dead, run the
-  # gcloud sign-in without shell access to this host.
+  # gcloud sign-in without shell access to this host. Off means the whole feature is
+  # absent: no page, no sidebar entry, and the endpoints behind it answer 404.
+  ALLOW_GCP_ADC_TOKEN_REFRESH: false
+
+  # Everything below only takes effect while the switch above is on.
   gcp_adk:
-    enabled: false
     # Impersonated by the re-login, so every operator's browser sign-in ends up
     # producing credentials for the same identity. Leave blank to write plain user
     # ADC instead (no --impersonate-service-account).

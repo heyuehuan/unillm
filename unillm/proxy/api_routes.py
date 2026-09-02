@@ -504,6 +504,10 @@ class ServerConfigResponse(BaseModel):
     # rather than taken from the browser so that two people in different places
     # reading the same log line see the same wall-clock time.
     display_timezone: str
+    # general_settings.ALLOW_GCP_ADC_TOKEN_REFRESH. False hides the Google Cloud
+    # auth page and its sidebar entry, matching the endpoints, which 404 anyway.
+    # A nav item leading to a 404 is worse than no nav item.
+    allow_gcp_adc_token_refresh: bool
 
 
 @router.get("/config", response_model=ServerConfigResponse)
@@ -517,10 +521,13 @@ def get_server_config(_: User = Depends(get_current_user), db: Session = Depends
     it decides how many tokens of logprobs a request can ask for before being
     rejected, so a non-admin sizing a batch job has to be able to read it.
     """
+    from unillm.proxy import gcp_adk
+
     return ServerConfigResponse(
         recoverable_keys_allowed=recoverable_keys_allowed(),
         logprobs_max_bytes=server_settings.get_setting(db, server_settings.LOGPROBS_MAX_BYTES),
         display_timezone=display_timezone(),
+        allow_gcp_adc_token_refresh=gcp_adk.load_config().enabled,
     )
 
 

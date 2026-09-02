@@ -28,6 +28,9 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true)
   const [sessionExpired, setSessionExpired] = useState(false)
   const [authError, setAuthError] = useState('')
+  // Deployment switches from /api/config. Null until it answers, which is why the
+  // features it gates stay hidden rather than flashing into view and disappearing.
+  const [serverConfig, setServerConfig] = useState(null)
   const { parts, query } = useHashRoute()
   const route = parts[0] || 'dashboard'
 
@@ -76,6 +79,7 @@ export default function App() {
     Promise.all([api.me(), api.getConfig().catch(() => null)])
       .then(([u, config]) => {
         if (config) setDisplayTimezone(config.display_timezone)
+        setServerConfig(config)
         setUser(u)
       })
       .catch(e => {
@@ -145,6 +149,9 @@ export default function App() {
 
   const isAdmin = user.global_role === 'admin'
   const filterProps = { filters, setFilters, scope, setScope }
+  // The sidebar hides what a deployment has not enabled, but a hash typed by hand
+  // reaches the router anyway, so the route needs the same gate.
+  const features = { gcpAuth: !!serverConfig?.allow_gcp_adc_token_refresh }
 
   let page
   if (route === 'dashboard') page = <Dashboard user={user} {...filterProps} />
@@ -155,14 +162,14 @@ export default function App() {
   else if (route === 'admin' && isAdmin) page = <Admin currentUser={user} tab={parts[1] || 'users'} />
   else if (route === 'sshkeys') page = <SSHKeys user={user} />
   else if (route === 'documentation') page = <Documentation section={parts[1] || null} />
-  else if (route === 'gcp-auth') page = <GcpAuth user={user} />
+  else if (route === 'gcp-auth' && features.gcpAuth) page = <GcpAuth user={user} />
   else if (route === 'settings') page = <Settings user={user} theme={theme} setTheme={setTheme} onUserUpdated={setUser} onLogout={handleLogout} />
   else page = <Dashboard user={user} {...filterProps} />
 
   return (
     <ConfirmProvider>
       <div className="app">
-        <Sidebar route={route} user={user} onLogout={handleLogout} />
+        <Sidebar route={route} user={user} features={features} onLogout={handleLogout} />
         <main className="main">
           <Topbar route={route} displayTheme={displayTheme} onToggleTheme={toggleDisplayTheme} />
           {page}

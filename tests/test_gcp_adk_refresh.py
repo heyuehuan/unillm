@@ -112,8 +112,8 @@ def enabled(monkeypatch):
     """Turn the feature on for the running proxy, as the YAML config would."""
     from unillm.proxy import proxy_server
 
+    monkeypatch.setitem(proxy_server.general_settings, gcp_adk.ALLOW_FLAG, True)
     monkeypatch.setitem(proxy_server.general_settings, "gcp_adk", {
-        "enabled": True,
         "service_account": "runner@example.iam.gserviceaccount.com",
         "health_model": "gemini-2.5-flash-lite",
         "stale_after_seconds": 3600,
@@ -270,6 +270,69 @@ def test_everything_is_404_when_the_feature_is_off(client, admin_auth):
     assert client.post("/api/gcp-adk-refresh/start", headers=admin_auth).status_code == 404
     assert client.post("/api/gcp-adk-refresh/health-test", headers=admin_auth).status_code == 404
     assert client.get("/api/gcp-adk-refresh/status", headers=admin_auth).json()["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# The switch itself
+# ---------------------------------------------------------------------------
+
+def _settings(monkeypatch, **values):
+    """Replace general_settings with exactly the keys a test cares about."""
+    from unillm.proxy import proxy_server
+
+    monkeypatch.setattr(proxy_server, "general_settings", dict(values))
+
+
+def test_the_feature_is_off_when_the_config_says_nothing(monkeypatch):
+    """A deployment that never heard of this feature must not get it."""
+    _settings(monkeypatch)
+    assert gcp_adk.load_config().enabled is False
+
+
+def test_the_allow_flag_turns_it_on(monkeypatch):
+    _settings(monkeypatch, ALLOW_GCP_ADC_TOKEN_REFRESH=True)
+    assert gcp_adk.load_config().enabled is True
+
+
+def test_the_allow_flag_is_matched_without_regard_to_case(monkeypatch):
+    """The rest of general_settings is lowercase, so both spellings have to work."""
+    _settings(monkeypatch, allow_gcp_adc_token_refresh=True)
+    assert gcp_adk.load_config().enabled is True
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("true", True), ("True", True), ("yes", True), ("on", True), ("1", True),
+    ("false", False), ("no", False), ("off", False), ("", False),
+    # Not a switch value at all. Enabling on "maybe" because it is a non-empty
+    # string is exactly the accident this feature must not have.
+    ("maybe", False), (None, False),
+])
+def test_a_switch_written_as_text_is_read_as_a_switch(monkeypatch, value, expected):
+    _settings(monkeypatch, ALLOW_GCP_ADC_TOKEN_REFRESH=value)
+    assert gcp_adk.load_config().enabled is expected
+
+
+def test_the_old_enabled_key_still_works(monkeypatch):
+    """Configs written before the flag existed keep running."""
+    _settings(monkeypatch, gcp_adk={"enabled": True})
+    assert gcp_adk.load_config().enabled is True
+
+
+def test_the_flag_wins_over_the_old_key(monkeypatch):
+    """An explicit "no" must not be undone by a leftover from the old spelling."""
+    _settings(monkeypatch, ALLOW_GCP_ADC_TOKEN_REFRESH=False, gcp_adk={"enabled": True})
+    assert gcp_adk.load_config().enabled is False
+
+
+def test_the_console_is_told_whether_the_feature_is_allowed(client, admin_auth, enabled):
+    """The sidebar hides the page when this is false, so it has to be reported."""
+    body = client.get("/api/config", headers=admin_auth).json()
+    assert body["allow_gcp_adc_token_refresh"] is True
+
+
+def test_the_console_is_told_when_the_feature_is_not_allowed(client, admin_auth):
+    body = client.get("/api/config", headers=admin_auth).json()
+    assert body["allow_gcp_adc_token_refresh"] is False
 
 
 def test_a_healthy_deployment_will_not_start_a_sign_in(client, user_auth, enabled):

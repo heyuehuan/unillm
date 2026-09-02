@@ -14,8 +14,9 @@ in again.
 can check the credentials and renew them from a browser, without a shell on the proxy host.
 
 {{#if gcp_adk=disabled}}
-> **This server has the feature turned off.** The page shows a notice instead of the
-> controls. An operator turns it on with `gcp_adk.enabled` in the server config.
+> **This server has the feature turned off.** Neither the page nor its sidebar entry
+> appears. An operator turns it on by setting `ALLOW_GCP_ADC_TOKEN_REFRESH: true` under
+> `general_settings` in the server config.
 {{/if}}
 
 ## Is anything wrong?

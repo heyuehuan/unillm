@@ -163,12 +163,24 @@ async def user_api_key_auth(
                 detail="This project has been archived",
             )
         crud.touch_api_key(db, db_key)
+        # None means "unrestricted", which is the right reading for a key configured
+        # in the environment — there is no list to consult. For a key that came out
+        # of the database it means the list is missing, and a missing allowlist must
+        # not read as an unlimited one. An empty list denies everything, which is the
+        # safe direction for a row that should not exist (the column is NOT NULL).
+        allowed_models = db_key.allowed_models
+        if allowed_models is None:
+            verbose_proxy_logger.warning(
+                f"API key {db_key.id} has no allowed_models; denying all models. "
+                "Set the key's model access in the console to fix it."
+            )
+            allowed_models = []
         auth_result = UserAPIKeyAuth(
             api_key=original_api_key,
             valid=True,
             project_id=db_key.project_id,
             api_key_name=db_key.name,
-            allowed_models=db_key.allowed_models,
+            allowed_models=allowed_models,
         )
         return await _apply_ssh(api_key, ssh_mode, auth_result, db)
 

@@ -195,6 +195,8 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
   async function loadKeys() {
     if (!canSeeKeys) return
     setLoading(true)
+    // Clear first: an error from the previous attempt has nothing to say about this one.
+    setError('')
     try { setKeys(await api.getKeys(project.id)) }
     catch (e) { setError(e.message) }
     finally { setLoading(false) }
@@ -233,6 +235,7 @@ function KeysTab({ project, canSeeKeys, canManage, canReveal }) {
       { title: 'Revoke API key', confirmLabel: 'Revoke key', danger: true },
     )
     if (!ok) return
+    setError('')
     try { await api.revokeKey(key.id); await loadKeys() }
     catch (e) { setError(e.message) }
   }
@@ -417,6 +420,7 @@ function MembersTab({ project, members, canManage, onReload }) {
   }
 
   async function saveRole(userId) {
+    setError('')
     try {
       await api.updateMemberRole(project.id, userId, editRole)
       setEditingId(null)
@@ -430,6 +434,7 @@ function MembersTab({ project, members, canManage, onReload }) {
       { title: 'Remove member', confirmLabel: 'Remove', danger: true },
     )
     if (!ok) return
+    setError('')
     try { await api.removeMember(project.id, member.user_id); await onReload() }
     catch (e) { setError(e.message) }
   }

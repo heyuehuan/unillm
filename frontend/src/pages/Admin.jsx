@@ -108,6 +108,8 @@ function UsersTab({ currentUser }) {
 
   async function load() {
     setLoading(true)
+    // Clear first: an error from the previous attempt has nothing to say about this one.
+    setError('')
     try { setUsers(await api.getUsers()) } catch (e) { setError(e.message) } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [])
@@ -273,6 +275,7 @@ function PricingTab() {
 
   async function load() {
     setLoading(true)
+    setError('')
     try { setPricing(await api.getPricing()) } catch (e) { setError(e.message) } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [])
@@ -299,6 +302,7 @@ function PricingTab() {
       { title: 'Delete pricing', confirmLabel: 'Delete', danger: true },
     )
     if (!ok) return
+    setError('')
     try { await api.deletePricing(modelName); await load() } catch (e) { setError(e.message) }
   }
 
@@ -407,6 +411,7 @@ function SettingsTab() {
 
   async function load() {
     setLoading(true)
+    setError('')
     try {
       const rows = await api.getSettings()
       setSettings(rows)
@@ -434,6 +439,7 @@ function SettingsTab() {
     )
     if (!ok) return
     setSavingKey(setting.key)
+    setError('')
     try { await api.resetSetting(setting.key); await load() } catch (e) { setError(e.message) } finally { setSavingKey(null) }
   }
 

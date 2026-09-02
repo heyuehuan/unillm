@@ -287,6 +287,8 @@ export default function SSHKeys({ user }) {
   const [error, setError] = useState('')
 
   async function load() {
+    // Clear first: an error from the previous attempt has nothing to say about this one.
+    setError('')
     try { setKeys(await api.getSSHKeys()) }
     catch (e) { setError(e.message) }
     finally { setLoading(false) }
@@ -327,6 +329,7 @@ export default function SSHKeys({ user }) {
       { title: 'Delete SSH key', confirmLabel: 'Delete key', danger: true },
     )
     if (!ok) return
+    setError('')
     try { await api.deleteSSHKey(id); await load() }
     catch (e) { setError(e.message) }
   }

@@ -732,7 +732,8 @@ class _LogprobsPlan(NamedTuple):
 
 
 async def _logprobs_response_plan(request_body, max_tokens: Optional[int], top_logprobs: Optional[int],
-                                  wire_format: Optional[str] = None) -> "_LogprobsPlan":
+                                  wire_format: Optional[str] = None,
+                                  sent_params: Optional[Dict[str, Any]] = None) -> "_LogprobsPlan":
     """
     Work out how this request's logprobs will be shaped and sized before calling out.
 
@@ -748,11 +749,17 @@ async def _logprobs_response_plan(request_body, max_tokens: Optional[int], top_l
     average. An average would reject requests that were going to fit, which is a worse
     failure than truncating a response that turned out too big — and truncation still
     catches those, exactly, after the fact.
+
+    `sent_params` is what is actually going upstream. With `drop_params` enabled, a
+    model that cannot do logprobs has them stripped there, so the response will carry
+    none — and sizing the request as though it would was how a plain completion on
+    such a model got a 413 for logprobs it was never going to receive.
     """
     min_logprob = min_logprob_for(getattr(request_body, "logprobs_min_p", None))
     response_format = wire_format or getattr(request_body, "logprobs_format", None) or OPENAI_FORMAT
     last_n = getattr(request_body, "logprobs_last_n", None)
-    if not _returns_logprobs(request_body):
+    dropped = sent_params is not None and "logprobs" not in sent_params
+    if dropped or not _returns_logprobs(request_body):
         return _LogprobsPlan(min_logprob, response_format, None, LogprobsBudget(None), None)
 
     max_bytes = await server_settings.get_setting_cached_async(server_settings.LOGPROBS_MAX_BYTES)
@@ -844,7 +851,8 @@ async def chat_completions(
     # Resolved once per request: the floor, the wire format and the size cap are all
     # response-side concerns the proxy applies itself, so none of them reach the backend
     # and none belong in handler_kwargs.
-    plan = await _logprobs_response_plan(request_body, max_tokens, request_body.top_logprobs)
+    plan = await _logprobs_response_plan(request_body, max_tokens, request_body.top_logprobs,
+                                         sent_params=optional_params)
     if plan.rejection:
         _log(status_code=413, error_message=plan.rejection)
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -986,7 +994,7 @@ async def completions(
 
     # `logprobs` is a count here, not a bool, and doubles as the per-position width.
     plan = await _logprobs_response_plan(request_body, max_tokens, request_body.logprobs,
-                                   wire_format=COMPACT_FORMAT)
+                                         wire_format=COMPACT_FORMAT, sent_params=optional_params)
     if plan.rejection:
         _log(status_code=413, error_message=plan.rejection)
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

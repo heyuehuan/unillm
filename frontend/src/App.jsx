@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from './api.js'
 import { useHashRoute, navigate } from './router.js'
 import { Sidebar, Topbar } from './components/Layout.jsx'
-import { ConfirmProvider } from './components/ui.jsx'
+import { ConfirmProvider, setDisplayTimezone } from './components/ui.jsx'
 import { DEFAULT_FILTERS } from './components/FilterBar.jsx'
 import Login from './pages/Login.jsx'
 import Dashboard from './pages/Dashboard.jsx'
@@ -69,8 +69,15 @@ export default function App() {
     if (!api.hasToken()) { setAuthLoading(false); return }
     setAuthLoading(true)
     setAuthError('')
-    api.me()
-      .then(u => setUser(u))
+    // The timezone every timestamp renders in comes from the server, and it has to
+    // be known before the first page paints — otherwise log pages appear in the
+    // browser's zone and then jump. A failed config call is not fatal: formatting
+    // falls back to the browser's own zone, which is where it was before.
+    Promise.all([api.me(), api.getConfig().catch(() => null)])
+      .then(([u, config]) => {
+        if (config) setDisplayTimezone(config.display_timezone)
+        setUser(u)
+      })
       .catch(e => {
         if (e.status === 401 || e.status === 403) api.clearToken()
         else setAuthError(e.message || 'Could not reach the server')

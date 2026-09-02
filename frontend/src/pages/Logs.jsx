@@ -3,7 +3,7 @@ import { api } from '../api.js'
 import { IcRefresh, IcX, IcSearch } from '../components/Icons.jsx'
 import FilterBar, { filtersToApiParams, ScopeToggle } from '../components/FilterBar.jsx'
 import { useLatestRequest, isAbort } from '../requests.js'
-import { HttpBadge, fmtDateTime, LoadError } from '../components/ui.jsx'
+import { HttpBadge, fmtDateTime, fmtTimeOfDay, timezoneLabel, LoadError } from '../components/ui.jsx'
 
 function DetailPanel({ log, onClose }) {
   return (
@@ -142,7 +142,7 @@ export default function Logs({ user, filters, setFilters, scope, setScope, selec
         <div className="page-h" style={{ marginBottom: 14 }}>
           <div>
             <h1 className="page-title">Request logs</h1>
-            <div className="page-sub">{total.toLocaleString()} matching requests</div>
+            <div className="page-sub">{total.toLocaleString()} matching requests · times in {timezoneLabel()}</div>
           </div>
           <div className="h-actions">
             <button className="btn" onClick={() => load()}><IcRefresh size={14} /> Refresh</button>
@@ -190,7 +190,7 @@ export default function Logs({ user, filters, setFilters, scope, setScope, selec
                   className={`log-row${selectedId === l.id ? ' selected' : ''}`}
                   onClick={() => setSelectedId(selectedId === l.id ? null : l.id)}
                 >
-                  <span className="log-time">{new Date(l.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 })}</span>
+                  <span className="log-time" title={fmtDateTime(l.created_at)}>{fmtTimeOfDay(l.created_at, { millis: true })}</span>
                   <span className="log-status"><HttpBadge code={l.status_code} /></span>
                   <span className="log-model"><span className="mono" style={{ fontSize: 12 }}>{l.model}</span></span>
                   {l.project_name && (

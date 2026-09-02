@@ -9,6 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from unillm.config import get_fernet_key, recoverable_keys_allowed
+from unillm.timefmt import iso_utc
 from unillm.db.models import (
     APIKey, AuditLog, ModelPricing, Project, RequestLog, ServerSetting, SSHKey, User, UserProjectAccess,
 )
@@ -958,8 +959,10 @@ def get_models_summary(db: Session, configured_models: list = None) -> List[Dict
             # describes the backend.
             "description": own.notes if own else None,
             "status": status,
-            "last_success_at": last_success.isoformat() if last_success else None,
-            "last_failure_at": last_failure.isoformat() if last_failure else None,
+            # iso_utc, not isoformat: the stored value is naive UTC, and an ISO
+            # string without an offset is read by the browser as local time.
+            "last_success_at": iso_utc(last_success),
+            "last_failure_at": iso_utc(last_failure),
             "total_requests": total,
             "pricing": {
                 "input_per_1m": p.input_per_1m,

@@ -5,7 +5,7 @@ import { navigate } from '../router.js'
 import { BarChart } from '../components/Charts.jsx'
 import { IcZap, IcDollar, IcSliders, IcRefresh, IcChevRight } from '../components/Icons.jsx'
 import FilterBar, { filtersToApiParams, describeFilters, ScopeToggle } from '../components/FilterBar.jsx'
-import { HttpBadge, fmtTokens, LoadError } from '../components/ui.jsx'
+import { HttpBadge, fmtTokens, fmtTimeOfDay, fmtDateTime, LoadError } from '../components/ui.jsx'
 
 function StatCard({ label, value, sub, icon }) {
   return (
@@ -15,11 +15,6 @@ function StatCard({ label, value, sub, icon }) {
       {sub && <div className="stat-sub">{sub}</div>}
     </div>
   )
-}
-
-function fmtTime(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 export default function Dashboard({ user, filters, setFilters, scope, setScope }) {
@@ -142,7 +137,7 @@ export default function Dashboard({ user, filters, setFilters, scope, setScope }
               <div>
                 {recent.map(r => (
                   <div key={r.id} className="log-row" onClick={() => navigate('logs', { sel: r.id })}>
-                    <span className="log-time">{fmtTime(r.created_at)}</span>
+                    <span className="log-time" title={fmtDateTime(r.created_at)}>{fmtTimeOfDay(r.created_at)}</span>
                     <span className="log-status"><HttpBadge code={r.status_code} /></span>
                     <span className="log-model mono" style={{ fontSize: 12 }}>{r.model}</span>
                     {r.project_name && (

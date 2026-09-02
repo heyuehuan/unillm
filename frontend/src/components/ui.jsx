@@ -2,25 +2,85 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react'
 
 // ── Formatting helpers (single source — pages must not re-implement these) ──
 
+// Every timestamp is rendered in the deployment's timezone, which the server sends
+// in /api/config. Two people in different places reading the same log line should
+// see the same wall-clock time, and the one comparing it against a Slack message or
+// a colleague's screenshot should not have to do the arithmetic.
+//
+// Undefined until the config arrives, which makes toLocale* fall back to the
+// browser's own zone — the old behaviour, and a safe default if the call fails.
+let displayTimezone
+
+export function setDisplayTimezone(tz) {
+  displayTimezone = tz || undefined
+}
+
+// Short name of the active zone right now, e.g. "EDT". Worth showing on pages full
+// of timestamps, so a reader knows which clock they are looking at.
+export function timezoneLabel(at = new Date()) {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: displayTimezone, timeZoneName: 'short' })
+      .formatToParts(at).find(p => p.type === 'timeZoneName')?.value || ''
+  } catch {
+    return ''
+  }
+}
+
+// A <input type="datetime-local"> value carries no timezone: "2026-09-02T09:30"
+// means whatever zone the person typing it had in mind. Since every timestamp on the
+// page is printed in the deployment's zone, that is the zone the input has to be read
+// in too — otherwise the same custom range selects different rows for each viewer, and
+// the rows it returns disagree with the times printed beside them.
+export function zonedInputToUtcISO(local) {
+  if (!local) return undefined
+  const guess = new Date(local)               // read in the browser's own zone
+  if (Number.isNaN(guess.getTime())) return undefined
+  if (!displayTimezone) return guess.toISOString()
+  // How far the browser's zone sits from the deployment's at that moment. Rendering
+  // the instant into the target zone and re-reading it as browser-local is the only
+  // way to get a zone offset out of Intl, DST included.
+  const asWallClock = new Date(guess.toLocaleString('en-US', { timeZone: displayTimezone }))
+  return new Date(guess.getTime() + (guess.getTime() - asWallClock.getTime())).toISOString()
+}
+
 export function fmtDate(iso) {
   if (!iso) return '—'
-  return new Date(iso).toLocaleDateString()
+  return new Date(iso).toLocaleDateString(undefined, { timeZone: displayTimezone })
 }
 
 export function fmtDateTime(iso) {
   if (!iso) return '—'
-  return new Date(iso).toLocaleString()
+  return new Date(iso).toLocaleString(undefined, { timeZone: displayTimezone })
+}
+
+// Clock time only, for log rows where the date is already established by the page.
+export function fmtTimeOfDay(iso, { millis = false } = {}) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    ...(millis ? { fractionalSecondDigits: 3 } : {}),
+    timeZone: displayTimezone,
+  })
 }
 
 export function fmtRelative(iso) {
   if (!iso) return 'never'
   const diff = Date.now() - new Date(iso).getTime()
+  // A timestamp in the future is either clock skew or a timestamp the server sent
+  // without a timezone, and saying "just now" for it is how the second one stayed
+  // invisible: every event, however old, read as current. Name it instead.
+  if (diff < -60000) return `in ${fmtSpan(-diff)}`
   const m = Math.floor(diff / 60000)
   if (m < 1) return 'just now'
-  if (m < 60) return `${m}m ago`
+  return `${fmtSpan(diff)} ago`
+}
+
+function fmtSpan(ms) {
+  const m = Math.floor(ms / 60000)
+  if (m < 60) return `${m}m`
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
+  if (h < 24) return `${h}h`
+  return `${Math.floor(h / 24)}d`
 }
 
 export function fmtTokens(n) {

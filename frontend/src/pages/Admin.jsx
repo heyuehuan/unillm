@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect } from 'react'
 import { api } from '../api.js'
 import { navigate } from '../router.js'
 import { IcPlus, IcTrash, IcX, IcEdit, IcRefresh } from '../components/Icons.jsx'
-import { fmtDateTime, useConfirm, CopyButton } from '../components/ui.jsx'
+import { fmtDateTime, timezoneLabel, useConfirm, CopyButton } from '../components/ui.jsx'
 import { useLatestRequest, isAbort } from '../requests.js'
 
 const GLOBAL_ROLES = [
@@ -630,7 +630,7 @@ function AuditTab() {
         <div className="card">
           <table className="table">
             <thead>
-              <tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Severity</th></tr>
+              <tr><th>Time ({timezoneLabel()})</th><th>Actor</th><th>Action</th><th>Resource</th><th>Severity</th></tr>
             </thead>
             <tbody>
               {logs.map(a => (

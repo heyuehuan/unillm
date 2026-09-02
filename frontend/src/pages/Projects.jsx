@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../api.js'
 import { navigate } from '../router.js'
 import { IcPlus, IcKey, IcTrash, IcX, IcChevRight, IcUsers, IcEdit, IcCheck, IcEye } from '../components/Icons.jsx'
-import { fmtDate, useConfirm, CopyButton, LoadError } from '../components/ui.jsx'
+import { fmtDate, fmtDateTime, useConfirm, CopyButton, LoadError } from '../components/ui.jsx'
 
 // Checkbox multi-select over known models, with a free-text line for
 // models the proxy hasn't seen yet. Empty selection = all models.
@@ -113,7 +113,7 @@ function KeyRow({ k, models, onRevoke, onSaved, canManage, canReveal }) {
           </span>
         </td>
         <td style={{ fontSize: 12, color: 'var(--text-3)' }}>
-          {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : 'Never'}
+          {k.last_used_at ? fmtDateTime(k.last_used_at) : 'Never'}
         </td>
         <td>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>

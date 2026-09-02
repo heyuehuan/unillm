@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { zonedInputToUtcISO, timezoneLabel } from './ui.jsx'
 
 const TIME_PRESETS = [
   { key: '24h', label: '24h' },
@@ -30,8 +31,10 @@ export function filtersToApiParams(filters) {
   const params = {}
   if (filters.projectIds.length) params.project_ids = filters.projectIds
   if (filters.timeRange === 'custom') {
-    if (filters.customFrom) params.from_date = new Date(filters.customFrom).toISOString()
-    if (filters.customTo) params.to_date = new Date(filters.customTo).toISOString()
+    const from = zonedInputToUtcISO(filters.customFrom)
+    const to = zonedInputToUtcISO(filters.customTo)
+    if (from) params.from_date = from
+    if (to) params.to_date = to
   } else if (filters.timeRange !== 'all') {
     const hours = { '24h': 24, '3d': 72, '7d': 168 }[filters.timeRange]
     params.from_date = new Date(Date.now() - hours * 3600 * 1000).toISOString()
@@ -185,6 +188,7 @@ export default function FilterBar({ projects = [], filters, onChange }) {
             value={filters.customTo}
             onChange={e => onChange({ ...filters, customTo: e.target.value })}
           />
+          <span style={{ color: 'var(--text-3)', fontSize: 11 }}>{timezoneLabel()}</span>
         </>
       )}
 

@@ -1,7 +1,7 @@
 ---
 title: Usage, logs and audit
 group: Console guide
-keywords: [dashboard, usage, stats, request log, audit, filters, labels, scope]
+keywords: [dashboard, usage, stats, request log, audit, filters, labels, scope, time, timezone]
 ---
 
 Four pages read the same two tables. The [Dashboard](#/dashboard) is the summary,
@@ -48,3 +48,21 @@ edited.
 
 Read the audit log when you need to answer who did this and when. Read the request log when
 you need to answer what did this cost and how did it perform.
+
+## What time is it?
+
+Every timestamp in the console — request logs, the audit trail, "last used", "last
+success" — is shown in one timezone chosen by the deployment, not by your browser. This
+server uses **{{display_timezone}}**. Two people in different places reading the same log
+row see the same wall-clock time, and a row can be compared against a chat message or a
+colleague's screenshot without anyone doing the arithmetic.
+
+The custom date range in the filter bar reads in that same zone, so the rows it selects
+agree with the times printed beside them. The zone's short name is shown next to the
+inputs.
+
+Timestamps are stored in UTC and the API always sends them with a `Z`, so scripts reading
+`/api/logs/requests` get unambiguous instants regardless of this setting. An operator
+changes the display zone with `display_timezone` in the server config; any IANA zone name
+works, and the region form (`America/Toronto`) is preferred over `EST` because it follows
+daylight saving on its own.

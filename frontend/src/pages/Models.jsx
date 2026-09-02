@@ -1,17 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api.js'
 import { IcX, IcZap } from '../components/Icons.jsx'
-
-function fmtTime(iso) {
-  if (!iso) return null
-  const d = new Date(iso)
-  const now = Date.now()
-  const diff = now - d.getTime()
-  if (diff < 60_000) return 'just now'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
-  return `${Math.floor(diff / 86_400_000)}d ago`
-}
+import { fmtRelative, fmtDateTime } from '../components/ui.jsx'
 
 const STATUS = {
   healthy: { label: 'Healthy', cls: 'green' },
@@ -112,10 +102,10 @@ function ModelCard({ model, onPricing }) {
 
       <div style={{ display: 'flex', gap: 16, fontSize: 12, color: 'var(--text-3)' }}>
         {model.last_success_at && (
-          <div>Last success <span style={{ color: 'var(--green)' }}>{fmtTime(model.last_success_at)}</span></div>
+          <div title={fmtDateTime(model.last_success_at)}>Last success <span style={{ color: 'var(--green)' }}>{fmtRelative(model.last_success_at)}</span></div>
         )}
         {model.last_failure_at && (
-          <div>Last fail <span style={{ color: 'var(--red)' }}>{fmtTime(model.last_failure_at)}</span></div>
+          <div title={fmtDateTime(model.last_failure_at)}>Last fail <span style={{ color: 'var(--red)' }}>{fmtRelative(model.last_failure_at)}</span></div>
         )}
         {!model.last_success_at && !model.last_failure_at && (
           <div>No requests recorded</div>

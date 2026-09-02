@@ -24,6 +24,7 @@ from unillm.proxy import docs_pages
 from unillm.proxy import forwarded
 from unillm.proxy import ratelimit
 from unillm.proxy import server_settings
+from unillm.timefmt import UtcDatetime, display_timezone
 
 router = APIRouter(prefix="/api", tags=["management"])
 
@@ -82,7 +83,7 @@ class UserResponse(BaseModel):
     global_role: str
     active: bool = True
     password_login_disabled: bool = False
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 _USERNAME_PATTERN = r"^[a-zA-Z0-9_.-]{2,32}$"
@@ -107,7 +108,7 @@ class ProjectResponse(BaseModel):
     name: str
     description: Optional[str]
     archived: bool = False
-    created_at: datetime
+    created_at: UtcDatetime
     # A personal project belongs to one account and takes no members. The console
     # needs to know so it can leave out membership controls that would only 400.
     personal: bool = False
@@ -133,8 +134,8 @@ class APIKeyResponse(BaseModel):
     key_prefix: str
     allowed_models: list
     active: bool
-    created_at: datetime
-    last_used_at: Optional[datetime]
+    created_at: UtcDatetime
+    last_used_at: Optional[UtcDatetime]
     # True when this key can be revealed later. Lets the console show the Reveal
     # button only where it will work, instead of offering it and then 404ing.
     recoverable: bool = False
@@ -154,8 +155,8 @@ class SSHKeyResponse(BaseModel):
     id: int
     key_name: str
     public_key: str
-    created_at: datetime
-    last_used_at: Optional[datetime] = None
+    created_at: UtcDatetime
+    last_used_at: Optional[UtcDatetime] = None
 
 
 class AddSSHKeyRequest(BaseModel):
@@ -166,7 +167,7 @@ class AddSSHKeyRequest(BaseModel):
 class RequestLogResponse(BaseModel):
     id: int
     request_id: Optional[str]
-    created_at: datetime
+    created_at: UtcDatetime
     project_id: Optional[int]
     project_name: Optional[str]
     api_key_name: Optional[str]
@@ -189,7 +190,7 @@ class RequestLogResponse(BaseModel):
 
 class AuditLogResponse(BaseModel):
     id: int
-    created_at: datetime
+    created_at: UtcDatetime
     user_id: Optional[int]
     username: Optional[str]
     action: str
@@ -218,7 +219,7 @@ class ModelPricingResponse(BaseModel):
     output_per_1m: float
     currency: str
     notes: Optional[str]
-    updated_at: datetime
+    updated_at: UtcDatetime
 
 
 class ServerSettingResponse(BaseModel):
@@ -248,7 +249,7 @@ class UpsertModelPricingRequest(BaseModel):
 class GcpAdkHealthResult(BaseModel):
     """One real call to the health model, and what it proved."""
     healthy: bool
-    checked_at: datetime
+    checked_at: UtcDatetime
     model: str
     latency_ms: int
     reply: Optional[str] = None
@@ -264,7 +265,7 @@ class GcpAdkSessionResponse(BaseModel):
     url: Optional[str] = None
     error: Optional[str] = None
     output: Optional[str] = None
-    started_at: datetime
+    started_at: UtcDatetime
     started_by: Optional[str] = None
     service_account: Optional[str] = None
     command: Optional[str] = None
@@ -279,9 +280,9 @@ class GcpAdkStatusResponse(BaseModel):
     window_seconds: int
     needs_refresh: bool
     reasons: List[str] = []
-    last_auth_failure_at: Optional[datetime] = None
+    last_auth_failure_at: Optional[UtcDatetime] = None
     last_auth_failure_message: Optional[str] = None
-    last_success_at: Optional[datetime] = None
+    last_success_at: Optional[UtcDatetime] = None
     last_health: Optional[GcpAdkHealthResult] = None
     active_session: Optional[GcpAdkSessionResponse] = None
 
@@ -499,6 +500,10 @@ class ServerConfigResponse(BaseModel):
     """Deployment switches the console needs in order to render honestly."""
     recoverable_keys_allowed: bool
     logprobs_max_bytes: int
+    # The IANA zone the console renders every timestamp in. Sent by the server
+    # rather than taken from the browser so that two people in different places
+    # reading the same log line see the same wall-clock time.
+    display_timezone: str
 
 
 @router.get("/config", response_model=ServerConfigResponse)
@@ -515,6 +520,7 @@ def get_server_config(_: User = Depends(get_current_user), db: Session = Depends
     return ServerConfigResponse(
         recoverable_keys_allowed=recoverable_keys_allowed(),
         logprobs_max_bytes=server_settings.get_setting(db, server_settings.LOGPROBS_MAX_BYTES),
+        display_timezone=display_timezone(),
     )
 
 

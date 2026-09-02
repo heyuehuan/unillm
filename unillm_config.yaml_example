@@ -13,6 +13,13 @@ model_list:
 
 general_settings:
   port: 4000
+
+  # Timezone the console renders every timestamp in — logs, the audit trail, "last
+  # used", everything. Set by the deployment rather than taken from each browser, so
+  # that two people comparing the same log line see the same wall-clock time.
+  # Any IANA zone name works ("UTC", "Europe/London", …). Use the region name rather
+  # than "EST": it follows daylight saving, so summer reads as EDT on its own.
+  display_timezone: America/Toronto
   # Strip params the model doesn't support instead of returning 400.
   # Same semantics as litellm's `litellm_settings: drop_params`.
   # drop_params: false

@@ -177,10 +177,12 @@ def context() -> Dict[str, str]:
     from unillm.proxy.auth import get_general_settings
     from unillm.proxy.ssh_auth import get_ssh_mode
     from unillm.proxy.gcp_adk import load_config
+    from unillm.timefmt import display_timezone
 
     return {
         "ssh_mode": get_ssh_mode(get_general_settings()),
         "gcp_adk": "enabled" if load_config().enabled else "disabled",
+        "display_timezone": display_timezone(),
     }
 
 

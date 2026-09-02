@@ -26,6 +26,7 @@ Point the OpenAI SDK at UniLLM, and it handles authentication, per-project API k
 - Built-in login brute-force protection: per-IP attempt limits plus per-username failure limits, both configurable
 - Security response headers on every response: a strict CSP (`script-src 'self'`), plus frame, sniffing, referrer and permissions policies, and HSTS over HTTPS
 - Usage dashboard with per-model/per-project stats
+- One timezone for the whole console, set by the deployment rather than by each browser (`general_settings.display_timezone`, default `America/Toronto`); the API always sends timestamps in UTC with a `Z`
 
 ## Architecture
 

@@ -185,6 +185,27 @@ def _load_public_key(public_key_str: str):
     raise ValueError(f"Unable to load public key - unsupported format")
 
 
+# Prefix that ties a signature to this protocol.
+#
+# The original format signs the API key's raw bytes, which says nothing about what
+# the signature is *for*. Any other tool that signs an opaque blob with the same SSH
+# key could therefore be used to mint a valid UniLLM signature, if it could be
+# talked into signing the right bytes. Prefixing a fixed, protocol-specific string
+# makes a signature meaningful only here.
+#
+# Both forms are accepted. The signature travels inside an API key that users have
+# already generated and pasted into config files, and a server upgrade must not
+# invalidate them; the signer emits the prefixed form and offers --legacy-signature
+# for talking to a server that predates this.
+SSH_SIGNATURE_DOMAIN = b"unillm-ssh-auth-v1\x00"
+
+
+def signing_messages(original_api_key: str) -> tuple:
+    """Every byte string a signature over `original_api_key` may legitimately cover."""
+    raw = original_api_key.encode()
+    return (SSH_SIGNATURE_DOMAIN + raw, raw)
+
+
 def verify_ssh_signature(
     original_api_key: str,
     signature_b64: str,
@@ -193,24 +214,29 @@ def verify_ssh_signature(
     """
     Verify that the signature was created by signing the original API key
     with the corresponding private key.
-    
+
     Args:
         original_api_key: The original API key that was signed
         signature_b64: Base64-encoded signature
         public_key_str: Public key in OpenSSH or PEM format
-        
+
     Returns:
         True if signature is valid, False otherwise
     """
+    return any(
+        _verify_one(message, signature_b64, public_key_str)
+        for message in signing_messages(original_api_key)
+    )
+
+
+def _verify_one(message: bytes, signature_b64: str, public_key_str: str) -> bool:
+    """Check one candidate message against the signature."""
     try:
         # Decode signature
         signature = base64.b64decode(signature_b64)
         
         # Load public key
         public_key = _load_public_key(public_key_str)
-        
-        # Verify signature based on key type
-        message = original_api_key.encode()
         
         if isinstance(public_key, rsa.RSAPublicKey):
             # RSA verification

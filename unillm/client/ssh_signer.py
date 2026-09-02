@@ -206,6 +206,11 @@ def _load_private_key(private_key_path: str, password: Optional[bytes] = None):
     raise ValueError(f"Unable to load private key from {path}. Unsupported format or wrong password.")
 
 
+# Must match SSH_SIGNATURE_DOMAIN in unillm/proxy/ssh_auth.py. Duplicated rather
+# than imported so the signer stays usable without the server package installed.
+SIGNATURE_DOMAIN = b"unillm-ssh-auth-v1\x00"
+
+
 def _sign_message(private_key, message: bytes) -> bytes:
     """
     Sign a message with a private key.
@@ -266,6 +271,7 @@ def sign_api_key(
     password: Optional[str] = None,
     verbose: bool = False,
     prompt_for_password: bool = False,
+    legacy_signature: bool = False,
 ) -> SignedAPIKey:
     """
     Sign an API key with an SSH private key.
@@ -279,6 +285,9 @@ def sign_api_key(
         verbose: If True, print information about key discovery
         prompt_for_password: If True, ask for the password on the terminal when the
             key turns out to be encrypted and no password was supplied
+        legacy_signature: If True, sign the API key's raw bytes instead of prefixing
+            them with the protocol domain. Only needed for a server too old to
+            accept the prefixed form.
         
     Returns:
         SignedAPIKey object with the signed key
@@ -346,9 +355,12 @@ def sign_api_key(
         else:
             raise ValueError(f"Failed to load private key: {e}")
     
-    # Sign the API key
+    # Sign the API key. The domain prefix states what the signature is for, so a
+    # signature made here cannot be reused as one for some other protocol, and a
+    # signature made elsewhere cannot be passed off as one of these.
+    message = api_key.encode() if legacy_signature else SIGNATURE_DOMAIN + api_key.encode()
     try:
-        signature = _sign_message(private_key, api_key.encode())
+        signature = _sign_message(private_key, message)
     except Exception as e:
         raise ValueError(f"Failed to sign API key: {e}")
     
@@ -417,6 +429,12 @@ Examples:
         help="Read the private key password from this environment variable"
     )
     parser.add_argument(
+        "--legacy-signature",
+        action="store_true",
+        help="Sign the API key's raw bytes, as versions before the protocol domain "
+             "prefix did. Only needed against a server too old to accept the new form."
+    )
+    parser.add_argument(
         "--list-keys", "-l",
         action="store_true",
         help="List available SSH keys and exit"
@@ -468,6 +486,7 @@ def main():
             password=_resolve_password(args, parser),
             verbose=args.verbose,
             prompt_for_password=True,
+            legacy_signature=args.legacy_signature,
         )
         
         if args.output == "full":

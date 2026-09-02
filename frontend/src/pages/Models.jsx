@@ -21,6 +21,7 @@ const STATUS = {
 
 function PricingOverlay({ model, onClose }) {
   const p = model.pricing
+  const inherited = model.pricing_source === 'inherited'
   useEffect(() => {
     function onKey(e) { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -33,7 +34,9 @@ function PricingOverlay({ model, onClose }) {
         <div className="card-h">
           <div>
             <h3 style={{ margin: 0 }}>{model.name}</h3>
-            <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>Pricing details</div>
+            <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
+              {inherited ? <>Inherited from <code>{model.pricing_from}</code></> : 'Pricing details'}
+            </div>
           </div>
           <button className="iconbtn" aria-label="Close" onClick={onClose}><IcX size={14} /></button>
         </div>
@@ -54,6 +57,13 @@ function PricingOverlay({ model, onClose }) {
               <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>per 1M tokens · {p.currency}</div>
             </div>
           </div>
+          {inherited && (
+            <div style={{ background: 'var(--amber-soft)', borderRadius: 8, padding: '12px 14px', fontSize: 13, color: 'var(--text-2)', marginBottom: p.notes ? 12 : 0 }}>
+              No price is set for <code>{model.name}</code>, so requests are costed at the
+              rate for <code>{model.pricing_from}</code>. Set a price on this model if the
+              variant bills differently.
+            </div>
+          )}
           {p.notes && (
             <div style={{ background: 'var(--bg-2)', borderRadius: 8, padding: '12px 14px', fontSize: 13, color: 'var(--text-2)' }}>
               {p.notes}
@@ -67,6 +77,8 @@ function PricingOverlay({ model, onClose }) {
 
 function ModelCard({ model, onPricing }) {
   const st = STATUS[model.status] || STATUS.unsure
+  // Worth flagging only once traffic exists — an unused model costs nothing yet.
+  const unpriced = model.pricing_source === 'none' && model.total_requests > 0
 
   return (
     <div className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -79,6 +91,14 @@ function ModelCard({ model, onPricing }) {
             )}
             {model.backend_model && model.backend_model !== model.name && (
               <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'JetBrains Mono, monospace' }}>→ {model.backend_model}</span>
+            )}
+            {model.pricing_source === 'inherited' && (
+              <span className="badge amber" style={{ fontSize: 11 }}
+                title={`Priced at the rate for ${model.pricing_from}`}>Inherited pricing</span>
+            )}
+            {unpriced && (
+              <span className="badge amber" style={{ fontSize: 11 }}
+                title="Requests to this model are logged without a cost">No pricing</span>
             )}
           </div>
           {model.description && (

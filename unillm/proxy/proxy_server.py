@@ -551,7 +551,12 @@ def _write_request_log(model: str, prompt_tokens: int, completion_tokens: int, *
     """
     db = SessionLocal()
     try:
-        cost = crud.compute_cost(db, model, prompt_tokens, completion_tokens)
+        # fields carries backend_model on through to the log row; pricing reads it
+        # so an alias without its own price inherits the backend's.
+        cost = crud.compute_cost(
+            db, model, prompt_tokens, completion_tokens,
+            backend_model=fields.get("backend_model"),
+        )
         crud.create_request_log(
             db=db, model=model,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,

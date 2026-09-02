@@ -913,7 +913,7 @@ def get_models_summary(db: Session, configured_models: list = None) -> List[Dict
     for name in all_names:
         # Last 10 requests for status
         recent = (
-            db.query(RequestLog.status_code, RequestLog.created_at)
+            db.query(RequestLog.status_code, RequestLog.created_at, RequestLog.backend_model)
             .filter(RequestLog.model == name)
             .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
             .limit(10)
@@ -934,13 +934,29 @@ def get_models_summary(db: Session, configured_models: list = None) -> List[Dict
 
         total = db.query(func.count(RequestLog.id)).filter(RequestLog.model == name).scalar() or 0
 
-        p = pricing_map.get(name)
         cfg = cfg_map.get(name, {})
+        # A model may have dropped out of the config while its requests remain, so
+        # fall back to the backend recorded on the requests themselves.
+        backend_model = cfg.get("backend_model") or next(
+            (r.backend_model for r in recent if r.backend_model), None
+        )
+
+        own = pricing_map.get(name)
+        p = own
+        pricing_source = "exact" if own else "none"
+        pricing_from = None
+        if p is None and backend_model and backend_model != name:
+            inherited = pricing_map.get(backend_model)
+            if inherited is not None:
+                p, pricing_source, pricing_from = inherited, "inherited", backend_model
+
         result.append({
             "name": name,
             "model_type": cfg.get("model_type"),
-            "backend_model": cfg.get("backend_model"),
-            "description": p.notes if p else None,
+            "backend_model": backend_model,
+            # Only the model's own row describes the model; an inherited row
+            # describes the backend.
+            "description": own.notes if own else None,
             "status": status,
             "last_success_at": last_success.isoformat() if last_success else None,
             "last_failure_at": last_failure.isoformat() if last_failure else None,
@@ -951,12 +967,51 @@ def get_models_summary(db: Session, configured_models: list = None) -> List[Dict
                 "currency": p.currency,
                 "notes": p.notes,
             } if p else None,
+            "pricing_source": pricing_source,
+            "pricing_from": pricing_from,
         })
     return result
 
 
-def compute_cost(db: Session, model_name: str, prompt_tokens: int, completion_tokens: int) -> Optional[float]:
+def resolve_model_pricing(
+    db: Session, model_name: str, backend_model: Optional[str] = None,
+) -> Tuple[Optional[ModelPricing], str]:
+    """
+    Find the price for a request, and say where it came from.
+
+    An alias is priced by its own row if it has one, otherwise by the row for the
+    backend model it resolves to. Most aliases exist to name a deployment, not a
+    different tariff — a CMEK variant bills the same per token, with the key
+    operations charged separately through KMS — so inheriting is right far more
+    often than it is wrong. An alias that genuinely costs more (provisioned
+    throughput, another region, batch) gets its own row, and because the alias is
+    checked first that row wins.
+
+    Inheritance fails quietly when it is wrong: the request looks priced, so nobody
+    goes looking. That is why the source is returned alongside the price and shown
+    per model in the console — "inherited" is a prompt to confirm the tariff really
+    is the same.
+
+    Returns (pricing, "exact" | "inherited" | "none").
+    """
     pricing = get_model_pricing(db, model_name)
+    if pricing is not None:
+        return pricing, "exact"
+    if backend_model and backend_model != model_name:
+        pricing = get_model_pricing(db, backend_model)
+        if pricing is not None:
+            return pricing, "inherited"
+    return None, "none"
+
+
+def compute_cost(
+    db: Session,
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    backend_model: Optional[str] = None,
+) -> Optional[float]:
+    pricing, _ = resolve_model_pricing(db, model_name, backend_model)
     if not pricing:
         return None
     cost = (prompt_tokens / 1_000_000) * pricing.input_per_1m + \

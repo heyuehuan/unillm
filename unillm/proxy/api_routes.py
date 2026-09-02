@@ -88,6 +88,9 @@ class ProjectResponse(BaseModel):
     description: Optional[str]
     archived: bool = False
     created_at: datetime
+    # A personal project belongs to one account and takes no members. The console
+    # needs to know so it can leave out membership controls that would only 400.
+    personal: bool = False
     # Only populated on list responses (for the project cards)
     member_count: Optional[int] = None
     key_count: Optional[int] = None
@@ -289,10 +292,12 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
-def _project_response(p, counts: Optional[Dict[str, int]] = None) -> ProjectResponse:
+def _project_response(p, counts: Optional[Dict[str, int]] = None,
+                      personal: Optional[bool] = None) -> ProjectResponse:
     return ProjectResponse(
         id=p.id, name=p.name, description=p.description,
         archived=p.archived, created_at=p.created_at,
+        personal=personal if personal is not None else False,
         member_count=counts["members"] if counts else None,
         key_count=counts["keys"] if counts else None,
     )
@@ -617,7 +622,8 @@ def list_projects(
         include_archived=include_archived,
     )
     counts = crud.get_project_counts(db, [p.id for p in projects])
-    return [_project_response(p, counts.get(p.id)) for p in projects]
+    personal_ids = crud.personal_project_ids(db, [p.id for p in projects])
+    return [_project_response(p, counts.get(p.id), p.id in personal_ids) for p in projects]
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
@@ -633,7 +639,7 @@ def get_project(
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return _project_response(p)
+    return _project_response(p, personal=crud.is_personal_project(db, project_id))
 
 
 @router.post("/projects", response_model=ProjectResponse, status_code=201)
@@ -703,9 +709,10 @@ class ProjectMemberResponse(BaseModel):
 
 
 class MemberCandidateResponse(BaseModel):
+    # Username only. Picking someone to add needs an identifier, not their contact
+    # details, and this list is readable by project admins rather than global ones.
     id: int
     username: str
-    email: Optional[str]
 
 
 class AddMemberRequest(BaseModel):
@@ -728,6 +735,29 @@ def _require_project_admin(db, current_user, project_id):
     role = crud.get_user_project_role(db, current_user.id, project_id)
     if role != "admin" and current_user.global_role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project admin access required")
+
+
+def _reject_personal_project(db, project_id):
+    """
+    Membership does not apply to a personal project.
+
+    Every non-viewer account is created owning one, and is its admin. That made
+    project-admin a right everybody held, so any user could reach the endpoints
+    below on their own project — and the candidate list, which answers "who else
+    could join", was the whole active-user directory including email addresses.
+    GET /users deliberately restricts exactly that to global admins.
+
+    A personal project is standalone: it belongs to one account and is not a place
+    other people are invited into. Refusing membership operations on it removes the
+    pivot, and stops an owner removing themselves from the project holding their
+    own API keys.
+    """
+    if crud.is_personal_project(db, project_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This is a personal project and cannot have members. "
+                   "Ask an administrator for a shared project.",
+        )
 
 
 @router.get("/projects/{project_id}/members", response_model=List[ProjectMemberResponse])
@@ -757,7 +787,8 @@ def list_member_candidates(
     _require_project_admin(db, current_user, project_id)
     if not crud.get_project_by_id(db, project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return [MemberCandidateResponse(id=u.id, username=u.username, email=u.email)
+    _reject_personal_project(db, project_id)
+    return [MemberCandidateResponse(id=u.id, username=u.username)
             for u in crud.list_member_candidates(db, project_id)]
 
 
@@ -772,6 +803,7 @@ def add_member(
     _require_project_admin(db, current_user, project_id)
     if not crud.get_project_by_id(db, project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    _reject_personal_project(db, project_id)
     existing = crud.get_user_project_role(db, req.user_id, project_id)
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already a member")
@@ -802,6 +834,7 @@ def update_member_role(
     db: Session = Depends(get_db),
 ):
     _require_project_admin(db, current_user, project_id)
+    _reject_personal_project(db, project_id)
     access = crud.update_member_role(db, project_id=project_id, user_id=user_id, role=req.role)
     if not access:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
@@ -824,6 +857,7 @@ def remove_member(
     db: Session = Depends(get_db),
 ):
     _require_project_admin(db, current_user, project_id)
+    _reject_personal_project(db, project_id)
     if not crud.remove_project_member(db, project_id=project_id, user_id=user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
     _audit(db, "project_member_removed", request, user=current_user,

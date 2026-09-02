@@ -236,6 +236,26 @@ def get_project_owner(db: Session, project_id: int) -> Optional[User]:
     return db.query(User).filter(User.personal_project_id == project_id).first()
 
 
+def is_personal_project(db: Session, project_id: int) -> bool:
+    """
+    Whether this project is somebody's personal project.
+
+    A personal project belongs to one account and is not a place other people are
+    invited into, so the membership endpoints refuse to operate on it.
+    """
+    return db.query(User.id).filter(User.personal_project_id == project_id).first() is not None
+
+
+def personal_project_ids(db: Session, project_ids: List[int]) -> set:
+    """Which of `project_ids` are personal projects — one query, for list responses."""
+    if not project_ids:
+        return set()
+    rows = db.query(User.personal_project_id).filter(
+        User.personal_project_id.in_(project_ids)
+    ).all()
+    return {row[0] for row in rows if row[0] is not None}
+
+
 def create_user(
     db: Session,
     username: str,

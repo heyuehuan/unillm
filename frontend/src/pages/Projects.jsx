@@ -380,6 +380,10 @@ function RoleSelect({ value, onChange, style }) {
 
 function MembersTab({ project, members, canManage, onReload }) {
   const confirm = useConfirm()
+  // A personal project is standalone — it belongs to one account and the server
+  // rejects every membership call on it. Hide the controls rather than offering
+  // buttons that can only ever produce an error.
+  const canEditMembers = canManage && !project.personal
   const [showAdd, setShowAdd] = useState(false)
   const [addUserId, setAddUserId] = useState('')
   const [addRole, setAddRole] = useState('developer')
@@ -432,7 +436,14 @@ function MembersTab({ project, members, canManage, onReload }) {
 
   return (
     <div>
-      {canManage && (
+      {project.personal && (
+        <div className="alert" style={{ marginBottom: 16 }}>
+          This is your personal project. It belongs to you alone and cannot take
+          other members — ask an administrator for a shared project.
+        </div>
+      )}
+
+      {canEditMembers && (
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }}>
           <button className="btn primary sm" onClick={openAdd}><IcPlus size={13} /> Add member</button>
         </div>
@@ -454,7 +465,7 @@ function MembersTab({ project, members, canManage, onReload }) {
                   onChange={e => setAddUserId(e.target.value)}>
                   <option value="">{candidatesLoading ? 'Loading users…' : 'Select a user…'}</option>
                   {candidates.map(u => (
-                    <option key={u.id} value={u.id}>{u.username}{u.email ? ` (${u.email})` : ''}</option>
+                    <option key={u.id} value={u.id}>{u.username}</option>
                   ))}
                 </select>
                 {candidatesError ? (
@@ -487,7 +498,7 @@ function MembersTab({ project, members, canManage, onReload }) {
           </div>
         ) : (
           <table className="table">
-            <thead><tr><th>User</th><th>Email</th><th>Role</th>{canManage && <th></th>}</tr></thead>
+            <thead><tr><th>User</th><th>Email</th><th>Role</th>{canEditMembers && <th></th>}</tr></thead>
             <tbody>
               {members.map(m => (
                 <tr key={m.user_id} className="row-hover">
@@ -499,7 +510,7 @@ function MembersTab({ project, members, canManage, onReload }) {
                   </td>
                   <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{m.email || '—'}</td>
                   <td>
-                    {canManage && editingId === m.user_id ? (
+                    {canEditMembers && editingId === m.user_id ? (
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         <RoleSelect value={editRole} onChange={setEditRole} style={{ width: 'auto' }} />
                         <button className="iconbtn" title="Save" aria-label="Save role" onClick={() => saveRole(m.user_id)}><IcCheck size={13} /></button>
@@ -510,7 +521,7 @@ function MembersTab({ project, members, canManage, onReload }) {
                         title={ROLES.find(r => r.id === m.role)?.hint}>{m.role}</span>
                     )}
                   </td>
-                  {canManage && (
+                  {canEditMembers && (
                     <td>
                       <div style={{ display: 'flex', gap: 4 }}>
                         <button className="iconbtn" title="Edit role" aria-label="Edit role" onClick={() => { setEditingId(m.user_id); setEditRole(m.role) }}>

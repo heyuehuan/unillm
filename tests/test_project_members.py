@@ -169,3 +169,76 @@ def test_members_report_active_accounts(client, admin_token):
 
     members = client.get(f"/api/projects/{project['id']}/members", headers=_auth(admin_token)).json()
     assert all(m["active"] for m in members)
+
+
+# ── personal projects are standalone ───────────────────────
+
+def _personal_project(client, token):
+    """The caller's own personal project, as the console would find it."""
+    r = client.get("/api/projects", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    personal = [p for p in r.json() if p["personal"]]
+    assert len(personal) == 1, personal
+    return personal[0]
+
+
+def test_an_ordinary_user_cannot_enumerate_the_directory_through_their_personal_project(
+        client, admin_token):
+    """
+    The leak: creating an account also creates a personal project and makes the
+    account its admin, so *everyone* passed the project-admin check on that one
+    project. Pointing the candidate endpoint at it answered "who else could join"
+    with the whole active-user directory — the listing GET /api/users restricts to
+    global admins.
+    """
+    _make_user(client, admin_token, "pp-snooper")
+    _make_user(client, admin_token, "pp-victim")
+    token = _login(client, "pp-snooper")
+
+    project = _personal_project(client, token)
+    assert client.get("/api/users", headers=_auth(token)).status_code == 403
+
+    r = client.get(f"/api/projects/{project['id']}/member-candidates", headers=_auth(token))
+    assert r.status_code == 400, r.text
+    assert "personal project" in r.json()["detail"]
+
+
+def test_personal_projects_reject_every_membership_change(client, admin_token):
+    """Even a global admin cannot turn somebody's personal project into a shared one."""
+    outsider = _make_user(client, admin_token, "pp-outsider")
+    owner = _make_user(client, admin_token, "pp-owner")
+    owner_token = _login(client, "pp-owner")
+    project = _personal_project(client, owner_token)
+
+    for token in (owner_token, admin_token):
+        r = _add_member(client, token, project["id"], outsider["id"], "developer")
+        assert r.status_code == 400, r.text
+
+        r = client.put(f"/api/projects/{project['id']}/members/{owner['id']}",
+                       headers=_auth(token), json={"role": "viewer"})
+        assert r.status_code == 400, r.text
+
+        # Also stops an owner removing themselves from the project holding their keys.
+        r = client.delete(f"/api/projects/{project['id']}/members/{owner['id']}",
+                          headers=_auth(token))
+        assert r.status_code == 400, r.text
+
+    members = client.get(f"/api/projects/{project['id']}/members",
+                         headers=_auth(owner_token)).json()
+    assert [m["username"] for m in members] == ["pp-owner"]
+
+
+def test_shared_projects_stay_manageable_and_candidates_omit_contact_details(
+        client, admin_token):
+    project = _make_project(client, admin_token, "pp-shared-project")
+    _make_user(client, admin_token, "pp-candidate")
+
+    detail = client.get(f"/api/projects/{project['id']}", headers=_auth(admin_token)).json()
+    assert detail["personal"] is False
+
+    r = client.get(f"/api/projects/{project['id']}/member-candidates", headers=_auth(admin_token))
+    assert r.status_code == 200, r.text
+    entry = next(u for u in r.json() if u["username"] == "pp-candidate")
+    # An identifier is enough to pick someone; email addresses are not this
+    # endpoint's to hand out.
+    assert set(entry) == {"id", "username"}

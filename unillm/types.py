@@ -42,6 +42,7 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
     logprobs: Optional[bool] = Field(None, description="Return log probabilities of the output tokens. Only served by models configured with supports_logprobs")
     top_logprobs: Optional[int] = Field(None, description="Number of most likely tokens to return at each position, each with a log probability. Requires logprobs=true", ge=0, le=20)
+    logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Thins top_logprobs at confident positions; the chosen token's own logprob is always kept. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
     user: Optional[str] = Field(None, description="Unique user identifier")
     labels: Optional[Dict[str, str]] = Field(None, description="Optional labels for request logging (UniLLM-only, not forwarded to backends)")
 
@@ -57,6 +58,14 @@ class ChatCompletionRequest(BaseModel):
         if self.top_logprobs is not None and not self.logprobs:
             raise ValueError(
                 "'top_logprobs' is only allowed when 'logprobs' is true"
+            )
+        # A floor with no alternatives to apply it to is a no-op the caller almost
+        # certainly did not intend, and this API fails loudly on unhonored params
+        # rather than returning a 200 that quietly ignored one.
+        if self.logprobs_min_p is not None and not self.top_logprobs:
+            raise ValueError(
+                "'logprobs_min_p' filters the alternatives returned by 'top_logprobs', "
+                "so it requires a non-zero 'top_logprobs'"
             )
         return self
 
@@ -87,7 +96,18 @@ class CompletionRequest(BaseModel):
     presence_penalty: Optional[float] = Field(None, description="Presence penalty (-2 to 2)")
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty (-2 to 2)")
     logprobs: Optional[int] = Field(None, description="Include log probabilities on the N most likely tokens. Legacy completions use an int here, not a bool", ge=0, le=20)
+    logprobs_min_p: Optional[float] = Field(None, description="Drop returned alternatives whose probability is below this floor (0-1). Requires a non-zero logprobs. UniLLM-only, applied to the response rather than forwarded", ge=0, le=1)
     user: Optional[str] = Field(None, description="Unique user identifier")
+
+    @model_validator(mode="after")
+    def _min_p_requires_logprobs(self):
+        """Same rule as chat: a floor needs alternatives to filter."""
+        if self.logprobs_min_p is not None and not self.logprobs:
+            raise ValueError(
+                "'logprobs_min_p' filters the alternatives returned by 'logprobs', "
+                "so it requires a non-zero 'logprobs'"
+            )
+        return self
 
     model_config = {
         "json_schema_extra": {

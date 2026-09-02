@@ -126,6 +126,39 @@ on vLLM — the Vertex handlers synthesize text completions from a chat call, an
 per-token output can't be reshaped into the legacy `{tokens, token_logprobs, text_offset}`
 format without inventing byte offsets.
 
+#### Trimming the payload with `logprobs_min_p`
+
+`top_logprobs` is a fixed count, so asking for 20 pays for 20 at *every* generated token —
+including positions where the model was almost certain and ranks 3-20 are noise. A
+500-token answer at `top_logprobs: 20` is roughly 1 MB of JSON against 2 KB of text.
+
+`logprobs_min_p` drops returned alternatives whose probability is below a floor:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-..." \
+  -d '{"model": "gemini-2.5-flash-lite", "messages": [{"role":"user","content":"hi"}],
+       "logprobs": true, "top_logprobs": 20, "logprobs_min_p": 0.01}'
+```
+
+It is a UniLLM-only parameter applied to the response, not forwarded to the backend, and it
+works on both completion endpoints, streamed and not. The chosen token's own `logprob` is
+never filtered — a sampled token can legitimately sit far down the tail, and dropping it
+would discard the one value every caller needs. Only the `top_logprobs` alternatives are
+thinned, so it requires a non-zero `top_logprobs` (a floor with nothing to filter is
+rejected with a 422 rather than silently ignored).
+
+**Pick the floor around `0.01`, not lower.** The saving comes from cutting *into* the top-k,
+and the top 20 of a real next-token distribution nearly always sit above `1e-4` — so a floor
+of `0.0001` typically removes nothing at all. At `0.01` a confident position keeps around 5-10
+alternatives instead of 20; genuinely uncertain positions keep all 20, which is the point.
+
+Note this is a filter over what the backend already returned, never a request for more. It
+cannot be used to ask for "everything above p": the OpenAI wire format only accepts a top-k
+count, and a bare threshold is unbounded anyway — probabilities sum to 1, so a floor of
+`0.0001` permits up to 10,000 alternatives at a single position where `top_logprobs` caps
+at 20.
+
 ### 3. Set required secrets and bootstrap the first admin
 
 ```bash

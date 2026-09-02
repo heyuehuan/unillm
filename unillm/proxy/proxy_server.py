@@ -49,6 +49,12 @@ from unillm.llm.params import (
     enabled_optional_params,
     resolve_optional_params,
 )
+from unillm.llm.logprobs import (
+    filter_choice_logprobs,
+    filter_legacy_logprobs,
+    filter_stream_chunk,
+    min_logprob_for,
+)
 
 
 # Model type constants
@@ -499,11 +505,21 @@ async def _prime_stream(stream):
     return _chain()
 
 
-async def _stream_with_logging(stream, model_alias: str, log_fields: Dict[str, Any], start_time: float):
+async def _stream_with_logging(
+    stream,
+    model_alias: str,
+    log_fields: Dict[str, Any],
+    start_time: float,
+    min_logprob: Optional[float] = None,
+):
     """
     Wrap an SSE stream: rewrite the model alias, capture the final usage numbers, and
     write exactly one request log when the stream ends (success or error). This is what
     makes streaming requests metered — previously they were logged as 200/0-tokens up front.
+
+    `min_logprob` thins each chunk's logprob alternatives. It rides along here because
+    every chunk is already parsed and re-serialized to rewrite the alias, so filtering
+    costs no extra pass; when it is None the chunks come out exactly as before.
     """
     prompt_tokens = 0
     completion_tokens = 0
@@ -519,6 +535,8 @@ async def _stream_with_logging(stream, model_alias: str, log_fields: Dict[str, A
                 try:
                     parsed = json.loads(data)
                     parsed["model"] = model_alias
+                    if min_logprob is not None:
+                        filter_stream_chunk(parsed, min_logprob)
                     usage = parsed.get("usage")
                     if usage:
                         prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
@@ -617,6 +635,10 @@ async def chat_completions(
             detail=_client_unsupported_params_detail(model, e),
         )
 
+    # Resolved once per request: the floor is a response-side filter applied by the
+    # proxy, so it is deliberately not part of handler_kwargs.
+    min_logprob = min_logprob_for(request_body.logprobs_min_p)
+
     try:
         handler_kwargs = {
             "model": actual_model,
@@ -644,9 +666,12 @@ async def chat_completions(
             # broken 200); the wrapper then writes the log once usage is known.
             response = await _prime_stream(response)
             return StreamingResponse(
-                _stream_with_logging(response, model, log_fields, start_time),
+                _stream_with_logging(response, model, log_fields, start_time, min_logprob),
                 media_type="text/event-stream",
             )
+
+        for choice in response.choices:
+            choice.logprobs = filter_choice_logprobs(choice.logprobs, min_logprob)
 
         response.model = model
         usage = response.usage
@@ -735,6 +760,8 @@ async def completions(
             detail=_client_unsupported_params_detail(model, e),
         )
 
+    min_logprob = min_logprob_for(request_body.logprobs_min_p)
+
     try:
         handler_kwargs = {
             "model": actual_model,
@@ -762,9 +789,12 @@ async def completions(
             # broken 200); the wrapper then writes the log once usage is known.
             response = await _prime_stream(response)
             return StreamingResponse(
-                _stream_with_logging(response, model, log_fields, start_time),
+                _stream_with_logging(response, model, log_fields, start_time, min_logprob),
                 media_type="text/event-stream",
             )
+
+        for choice in response.choices:
+            choice.logprobs = filter_legacy_logprobs(choice.logprobs, min_logprob)
 
         response.model = model
         usage = response.usage
